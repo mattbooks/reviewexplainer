@@ -1,17 +1,23 @@
 /**
- * One bare clone per repository, shared by a worktree per pull request.
- * Worktrees are disposable: they are reset before every AI run and removed
- * when the PR closes.
+ * One bare clone per repository, plus a disposable checkout per pull request.
+ *
+ * A PR's checkout is a `git clone --shared` of the mirror whose git directory
+ * lives outside the working tree (see core/checkout.ts), so an agent with a
+ * shell can change the working tree but not the git config, hooks or refs
+ * that the watcher later runs git against. Checkouts are reset before every
+ * AI run and removed when the PR closes.
  */
 import { existsSync, mkdirSync, readdirSync, rmSync } from "node:fs";
-import { dirname, join, resolve, sep } from "node:path";
-import { git } from "@reviewexplainer/core";
+import { dirname, join, resolve } from "node:path";
+import { git, prepareCheckout, removeCheckout, resetCheckout, type Checkout, type CheckoutPaths } from "@reviewexplainer/core";
 
 export type RemoteUrl = (owner: string, repo: string, cloneUrl: string) => string;
 
 export class Worktrees {
   readonly reposDir: string;
   readonly worktreesDir: string;
+  readonly gitDirsDir: string;
+  readonly scratchDir: string;
 
   constructor(
     root: string,
@@ -19,8 +25,9 @@ export class Worktrees {
   ) {
     this.reposDir = join(root, "repos");
     this.worktreesDir = join(root, "worktrees");
-    mkdirSync(this.reposDir, { recursive: true });
-    mkdirSync(this.worktreesDir, { recursive: true });
+    this.gitDirsDir = join(root, "gitdirs");
+    this.scratchDir = join(root, "scratch");
+    for (const d of [this.reposDir, this.worktreesDir, this.gitDirsDir, this.scratchDir]) mkdirSync(d, { recursive: true });
   }
 
   mirror(owner: string, repo: string): string {
@@ -29,6 +36,17 @@ export class Worktrees {
 
   path(owner: string, repo: string, number: number): string {
     return join(this.worktreesDir, owner, repo, `pr-${number}`);
+  }
+
+  paths(owner: string, repo: string, number: number): CheckoutPaths {
+    const rel = join(owner, repo, `pr-${number}`);
+    return { dir: join(this.worktreesDir, rel), gitDir: join(this.gitDirsDir, rel), scratch: join(this.scratchDir, rel) };
+  }
+
+  /** Checkout paths for a working-tree path (as stored in PR records). */
+  private pathsFor(dir: string): CheckoutPaths {
+    const rel = resolve(dir).slice(resolve(this.worktreesDir).length + 1);
+    return { dir: resolve(dir), gitDir: join(this.gitDirsDir, rel), scratch: join(this.scratchDir, rel) };
   }
 
   async ensureMirror(owner: string, repo: string, cloneUrl: string): Promise<string> {
@@ -55,49 +73,46 @@ export class Worktrees {
     );
   }
 
-  /** Create the worktree at `sha`, or move an existing one there. */
+  /** Create the checkout at `sha`, or move an existing one there. */
   async checkout(owner: string, repo: string, number: number, sha: string): Promise<string> {
-    const path = this.path(owner, repo, number);
-    if (existsSync(join(path, ".git"))) {
-      await git(path, "checkout", "--quiet", "--detach", "--force", sha);
-      await git(path, "clean", "-fdxq");
-    } else {
-      rmSync(path, { recursive: true, force: true });
-      mkdirSync(dirname(path), { recursive: true });
-      await git(this.mirror(owner, repo), "worktree", "add", "--quiet", "--detach", "--force", path, sha);
-    }
-    return path;
+    return (await this.open(owner, repo, number, sha)).dir;
+  }
+
+  /** The checkout with what the sandbox needs to know about it. */
+  async open(owner: string, repo: string, number: number, sha: string): Promise<Checkout> {
+    const paths = this.paths(owner, repo, number);
+    // A checkout from before checkouts had their own git dir: start over.
+    if (existsSync(join(paths.dir, ".git")) && !existsSync(join(paths.gitDir, "HEAD"))) await this.removeLegacy(owner, repo, paths.dir);
+    return prepareCheckout(this.mirror(owner, repo), sha, paths);
   }
 
   /** Throw away anything an agent changed. */
   async reset(path: string): Promise<void> {
-    await git(path, "reset", "--quiet", "--hard");
-    await git(path, "clean", "-fdxq");
+    await resetCheckout(this.pathsFor(path));
+  }
+
+  private async removeLegacy(owner: string, repo: string, dir: string): Promise<void> {
+    const mirror = this.mirror(owner, repo);
+    if (existsSync(mirror)) await git(mirror, "worktree", "remove", "--force", dir).catch(() => undefined);
+    rmSync(dir, { recursive: true, force: true });
+    if (existsSync(mirror)) await git(mirror, "worktree", "prune").catch(() => undefined);
   }
 
   async remove(owner: string, repo: string, number: number): Promise<void> {
     const mirror = this.mirror(owner, repo);
-    const path = this.path(owner, repo, number);
+    const paths = this.paths(owner, repo, number);
     if (existsSync(mirror)) {
-      try {
-        await git(mirror, "worktree", "remove", "--force", path);
-      } catch {
-        // Not registered (or already gone): remove the directory below.
-      }
+      await git(mirror, "worktree", "remove", "--force", paths.dir).catch(() => undefined);
       for (const ref of [`refs/greview/pr/${number}`, `refs/greview/base/${number}`]) {
-        try {
-          await git(mirror, "update-ref", "-d", ref);
-        } catch {
-          // ref may not exist
-        }
+        await git(mirror, "update-ref", "-d", ref).catch(() => undefined);
       }
     }
-    rmSync(path, { recursive: true, force: true });
-    if (existsSync(mirror)) await git(mirror, "worktree", "prune");
+    removeCheckout(paths);
+    if (existsSync(mirror)) await git(mirror, "worktree", "prune").catch(() => undefined);
   }
 
   /**
-   * Remove worktrees that no record owns: left over from a crash, or from a
+   * Remove checkouts that no record owns: left over from a crash, or from a
    * record that was deleted. Returns the paths removed.
    */
   async pruneOrphans(keep: Set<string>): Promise<string[]> {
@@ -105,27 +120,17 @@ export class Worktrees {
     const kept = new Set([...keep].map((p) => resolve(p)));
     for (const owner of existsSync(this.reposDir) ? readdirSync(this.reposDir) : []) {
       for (const repoDir of readdirSync(join(this.reposDir, owner))) {
-        const mirror = join(this.reposDir, owner, repoDir);
-        await git(mirror, "worktree", "prune");
-        const listing = await git(mirror, "worktree", "list", "--porcelain");
-        for (const line of listing.split("\n")) {
-          if (!line.startsWith("worktree ")) continue;
-          const path = resolve(line.slice(9));
-          if (!path.startsWith(this.worktreesDir + sep) || kept.has(path)) continue;
-          await git(mirror, "worktree", "remove", "--force", path).catch(() => undefined);
-          rmSync(path, { recursive: true, force: true });
-          removed.push(path);
-        }
+        await git(join(this.reposDir, owner, repoDir), "worktree", "prune").catch(() => undefined);
       }
     }
-    // Directories git no longer knows about.
-    for (const owner of readdirSync(this.worktreesDir)) {
-      for (const repo of readdirSync(join(this.worktreesDir, owner))) {
-        for (const pr of readdirSync(join(this.worktreesDir, owner, repo))) {
-          const path = resolve(join(this.worktreesDir, owner, repo, pr));
-          if (!kept.has(path) && !removed.includes(path)) {
-            rmSync(path, { recursive: true, force: true });
-            removed.push(path);
+    for (const base of [this.worktreesDir, this.gitDirsDir, this.scratchDir]) {
+      for (const owner of readdirSync(base)) {
+        for (const repo of readdirSync(join(base, owner))) {
+          for (const pr of readdirSync(join(base, owner, repo))) {
+            const dir = resolve(join(this.worktreesDir, owner, repo, pr));
+            if (kept.has(dir)) continue;
+            rmSync(join(base, owner, repo, pr), { recursive: true, force: true });
+            if (!removed.includes(dir)) removed.push(dir);
           }
         }
       }

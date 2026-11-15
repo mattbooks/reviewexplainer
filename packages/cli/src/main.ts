@@ -17,11 +17,14 @@ import { locateReview, outputPath, repoContext } from "./locate.ts";
 const HELP = `greview ${TOOL_VERSION}: guided code reviews
 
 Usage:
-  greview init [base..head] [--pr N] [--with-blobs] [--out FILE] [--ai [--model provider/id] [--no-findings]]
+  greview init [base..head] [--pr N] [--with-blobs] [--out FILE] [--ai [--model provider/id] [--no-findings] [--sandbox MODE]]
       Collect the diff and write a review file with a rule-based reading order.
       Defaults to origin's default branch..HEAD.
-  greview ai [FILE] [--model provider/id] [--no-findings]
-      Run pi to write the reading order, explanations and AI findings.
+  greview ai [FILE] [--model provider/id] [--no-findings] [--sandbox MODE]
+      Run pi to write the reading order, explanations and AI findings. The agent works
+      in a temporary checkout of the head commit. --sandbox (default "sandbox.mode" in the
+      user config, else auto): safehouse (run commands in agent-safehouse), readonly
+      (no shell), none (unsandboxed shell), auto (safehouse if installed, else readonly).
   greview sync github [FILE]
       Pull PR review comments and replies into the file.
   greview push github [FILE] [--no-open]
@@ -38,13 +41,13 @@ Usage:
       Print the JSON Schema of the review file.
 
   greview watch [--once] [--serve [--port N]]
-      Keep a review, in its own worktree, for every open PR matching the filters in
+      Keep a review, in its own checkout, for every open PR matching the filters in
       ~/.config/greview/config.json ("watch"). New PRs get an AI review; new pushes are
       re-reviewed in the same AI session; closed PRs are cleaned up. --once runs one pass.
   greview watch status
       List watched pull requests.
   greview watch clean
-      Remove closed and paused reviews and orphaned worktrees now.
+      Remove closed and paused reviews and orphaned checkouts now.
   greview inbox [--port N] [--no-open]
       Open the viewer with every watched review.
 
@@ -57,6 +60,18 @@ const log = (line: string) => process.stderr.write(`${line}\n`);
 
 function out(line: string) {
   process.stdout.write(`${line}\n`);
+}
+
+/** Sandbox settings from the user config, with the mode from --sandbox if given. */
+async function sandboxSettings(mode: string | undefined) {
+  const { loadSandboxSettings, parseSandboxSettings } = await import("@reviewexplainer/pi-extension");
+  const base = loadSandboxSettings();
+  if (mode === undefined) return base;
+  try {
+    return parseSandboxSettings({ ...base, mode });
+  } catch (e) {
+    bad((e as Error).message.replace(/^Unknown sandbox mode/, "Unknown --sandbox"));
+  }
 }
 
 function bad(message: string): never {
@@ -80,6 +95,7 @@ export async function main(argv: string[], env: { cwd?: string } = {}): Promise<
       head: { type: "string" },
       once: { type: "boolean" },
       serve: { type: "boolean" },
+      sandbox: { type: "string" },
       help: { type: "boolean", short: "h" },
       version: { type: "boolean", short: "v" },
     },
@@ -113,18 +129,19 @@ export async function main(argv: string[], env: { cwd?: string } = {}): Promise<
       log(`Wrote ${review.files.length} files, ${hunks} hunks in ${review.guide.steps.length} steps.`);
       if (values.ai) {
         const { runAi } = await import("./ai.ts");
-        await runAi({ file, cwd, findings: !values["no-findings"], log, stream: true, ...(values.model ? { model: values.model } : {}) });
+        await runAi({ file, cwd, findings: !values["no-findings"], log, stream: true, sandbox: await sandboxSettings(values.sandbox), ...(values.model ? { model: values.model } : {}) });
       }
       out(file);
       return 0;
     }
 
     case "ai": {
+      const sandbox = await sandboxSettings(values.sandbox);
       const file = await locateReview(cwd, args[0]);
       const { runAi } = await import("./ai.ts");
       const ctx = await repoContext(cwd);
       const model = values.model ?? ctx.config.model;
-      await runAi({ file, cwd: ctx.root ?? cwd, findings: !values["no-findings"], log, stream: true, ...(model ? { model } : {}) });
+      await runAi({ file, cwd: ctx.root ?? cwd, findings: !values["no-findings"], log, stream: true, sandbox, ...(model ? { model } : {}) });
       const review = readReview(file);
       const ai = review.threads.filter((t) => t.source === "ai").length;
       log(`Guide: ${review.guide.steps.length} steps. AI threads: ${ai}. Notes: ${review.annotations.length}.`);
@@ -225,6 +242,7 @@ export async function main(argv: string[], env: { cwd?: string } = {}): Promise<
       }
       const client = await GitHubClient.create();
       const watcher = new Watcher({ config, client, log: (l) => log(`${new Date().toLocaleTimeString()} ${l}`) });
+      if (!sub) log(watcher.describeSandbox());
       if (sub === "clean") {
         const purged = await watcher.clean();
         out(purged.length ? `Removed ${purged.join(", ")}` : "Nothing to clean.");

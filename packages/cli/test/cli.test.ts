@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AddressInfo } from "node:net";
@@ -167,7 +167,7 @@ describe("resumable AI sessions", () => {
       cwd: root,
       findings: true,
       log: () => {},
-      readOnly: true,
+      sandboxPlan: { kind: "readonly", settings: { mode: "readonly" } },
       sessionDir: join(home, "sessions"),
       sessionOverrides: { modelRuntime: runtime, model: faux.getModel() },
     });
@@ -180,18 +180,90 @@ describe("resumable AI sessions", () => {
       cwd: root,
       findings: true,
       log: () => {},
-      readOnly: true,
+      sandboxPlan: { kind: "readonly", settings: { mode: "readonly" } },
       sessionFile: first.sessionFile!,
       prompt: "The PR was updated and needs a re-review.",
       sessionOverrides: { modelRuntime: runtime, model: faux.getModel() },
     });
     expect(second.sessionFile).toBe(first.sessionFile);
     expect(second.summary).toBe("Re-review done.");
-    // The second call sees everything from the first run plus the first answer and the new prompt.
-    expect(seen[1]!.messages - seen[0]!.messages).toBe(2);
+    // The second call sees everything from the first run plus the first answer, a
+    // note from pi that the working directory moved (each run gets a fresh
+    // temporary checkout) and the new prompt.
+    expect(seen[1]!.messages - seen[0]!.messages).toBe(3);
     expect(seen[0]!.tools).toContain("review_git_show");
     expect(seen[0]!.tools).toContain("read");
     expect(seen[0]!.tools).not.toContain("bash");
+  });
+});
+
+describe("sandboxed AI reviews", () => {
+  it("lets the agent run commands in a throwaway checkout of the head, with git it cannot redirect", async () => {
+    const { fakeSafehouse } = await import("../../pi-extension/test/fake-safehouse.ts");
+    const { resolveSandbox } = await import("@reviewexplainer/pi-extension");
+    const root = repo();
+    await main(["init", "main..feature"], { cwd: root });
+    const file = lastLine();
+    const head = readReview(file).subject.head.sha;
+    const fake = fakeSafehouse(home);
+    const faux = fauxProvider({ provider: "faux", models: [{ id: "scripted" }] });
+    const runtime = await ModelRuntime.create({ authPath: join(home, "auth.json"), modelsPath: null, refreshOnCreate: false });
+    runtime.registerNativeProvider(faux.provider);
+    const results: string[] = [];
+    const lastResult = (context: any) => {
+      const m = [...context.messages].reverse().find((x: any) => x.role === "toolResult");
+      results.push(m ? m.content.map((c: any) => c.text ?? "").join("") : "");
+    };
+    let tools: string[] = [];
+    process.env.OPENAI_API_KEY = "sk-test-leak";
+    faux.setResponses([
+      (context: any) => {
+        tools = context.messages.flatMap((m: any) => (m.toolsAdded ?? []).map((t: any) => t.name));
+        return fauxAssistantMessage(
+          [
+            fauxToolCall("bash", {
+              command: "git rev-parse HEAD; echo \"key=${OPENAI_API_KEY:-none}\"; touch pwned; printf 'gitdir: /nonexistent\\n' > .git; pwd",
+            }),
+          ],
+          { stopReason: "toolUse" },
+        );
+      },
+      (context: any) => {
+        lastResult(context);
+        return fauxAssistantMessage([fauxToolCall("review_git_show", { path: "src/service.ts", rev: "head" })], { stopReason: "toolUse" });
+      },
+      (context: any) => {
+        lastResult(context);
+        return fauxAssistantMessage([fauxText("Checked.")]);
+      },
+    ]);
+    try {
+      const result = await runAi({
+        file,
+        cwd: root,
+        findings: true,
+        log: () => {},
+        sandboxPlan: resolveSandbox({ mode: "safehouse", command: fake.command }),
+        sessionOverrides: { modelRuntime: runtime, model: faux.getModel() },
+      });
+      expect(result.sandbox).toBe("safehouse");
+    } finally {
+      delete process.env.OPENAI_API_KEY;
+    }
+    expect(tools).toContain("bash");
+    expect(tools).not.toContain("edit");
+    expect(tools).not.toContain("write");
+    const [bashOut, showOut] = results;
+    expect(bashOut).toContain(head);
+    expect(bashOut).toContain("key=none");
+    const checkoutDir = bashOut!.trim().split("\n").at(-1)!;
+    expect(checkoutDir).toMatch(/greview-ai-.*work$/);
+    // The user's repository is untouched and the checkout is gone.
+    expect(existsSync(join(root, "pwned"))).toBe(false);
+    expect(existsSync(checkoutDir)).toBe(false);
+    // review_git_show still read the real repository after the agent redirected .git.
+    expect(showOut).toContain("email");
+    expect(fake.calls().length).toBeGreaterThan(0);
   });
 });
 

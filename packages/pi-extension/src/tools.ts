@@ -31,6 +31,8 @@ export interface ReviewSession {
   ai(): { model: string; provider: string } | undefined;
   /** Working directory of the agent (a checkout of the repository). */
   cwd(): string;
+  /** Run git for the review tools. Default: git in cwd(). Checkouts pass a runner that never trusts the agent-writable `.git`. */
+  git?: (...args: string[]) => Promise<string>;
 }
 
 export interface ToolResult {
@@ -337,7 +339,8 @@ export const reviewGitShowTool: ReviewTool<typeof gitShowParams> = {
     if (p.path.startsWith("-") || p.path.includes("..")) throw new Error("path must be a plain repository path");
     let content: string;
     try {
-      content = await git(session.cwd(), "show", `${sha}:${p.path}`);
+      const args = ["show", "--no-textconv", `${sha}:${p.path}`];
+      content = session.git ? await session.git(...args) : await git(session.cwd(), ...args);
     } catch {
       throw new Error(`${p.path} does not exist at ${rev} (${sha.slice(0, 12)})`);
     }

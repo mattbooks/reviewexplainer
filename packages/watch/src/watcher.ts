@@ -22,7 +22,7 @@ import {
   type PullRequestDetails,
   type SearchHit,
 } from "@reviewexplainer/core";
-import { rereviewPrompt, runAi, type AiOptions } from "@reviewexplainer/pi-extension";
+import { describePlan, loadSandboxSettings, rereviewPrompt, resolveSandbox, runAi, type AiOptions, type SandboxPlan } from "@reviewexplainer/pi-extension";
 import type { WatchConfig, WatchFilter } from "./config.ts";
 import { prKey, StateStore, type PrRecord } from "./state.ts";
 import { Worktrees, type RemoteUrl } from "./worktrees.ts";
@@ -42,6 +42,8 @@ export interface WatcherOptions {
   ai?: Partial<AiOptions>;
   /** Replace the AI runner (tests). */
   runAi?: typeof runAi;
+  /** Sandbox for AI runs; default from the `sandbox` user config. */
+  sandboxPlan?: SandboxPlan;
 }
 
 export interface TickSummary {
@@ -62,12 +64,20 @@ export class Watcher {
   private readonly running = new Map<string, Promise<void>>();
   private readonly log: (line: string) => void;
   private readonly now: () => Date;
+  /** Resolved once, so a missing safehouse fails at start rather than per PR. */
+  readonly sandbox: SandboxPlan;
 
   constructor(private readonly opts: WatcherOptions) {
     this.state = new StateStore(opts.config.root);
     this.worktrees = new Worktrees(opts.config.root, opts.remoteUrl);
     this.log = opts.log ?? ((line) => process.stderr.write(`${line}\n`));
     this.now = opts.now ?? (() => new Date());
+    this.sandbox = opts.sandboxPlan ?? resolveSandbox(loadSandboxSettings());
+  }
+
+  /** One line for the start of `greview watch`. */
+  describeSandbox(): string {
+    return describePlan(this.sandbox);
   }
 
   private get config(): WatchConfig {
@@ -300,8 +310,9 @@ export class Watcher {
       await this.worktrees.ensureMirror(rec.owner, rec.repo, details.cloneUrl);
       await this.worktrees.fetchPr(rec.owner, rec.repo, rec.number, details.baseRef);
       const worktree = await this.worktrees.checkout(rec.owner, rec.repo, rec.number, details.headSha);
+      // git runs against the mirror, never in the checkout an agent can write.
       const { review } = await initReview({
-        cwd: worktree,
+        cwd: this.worktrees.mirror(rec.owner, rec.repo),
         pr: rec.number,
         client: this.client,
         repo: { owner: rec.owner, name: rec.repo },
@@ -333,7 +344,7 @@ export class Watcher {
     try {
       await this.worktrees.fetchPr(rec.owner, rec.repo, rec.number, details.baseRef);
       const review = readReview(rec.reviewFile!);
-      const { review: next, report } = await refreshFromGit(review, { cwd: rec.worktree!, client: this.client });
+      const { review: next, report } = await refreshFromGit(review, { cwd: this.worktrees.mirror(rec.owner, rec.repo), client: this.client });
       await this.worktrees.checkout(rec.owner, rec.repo, rec.number, next.subject.head.sha);
       writeReview(rec.reviewFile!, next);
       const head = next.subject.head.sha;
@@ -372,23 +383,25 @@ export class Watcher {
     const headAtStart = rec.headSha!;
     this.log(`${key}: AI ${rec.job === "rereview" ? "re-review" : "review"} started`);
     try {
-      await this.worktrees.reset(rec.worktree!);
+      // Back to a clean checkout of the head before every run.
+      const checkout = await this.worktrees.open(rec.owner, rec.repo, rec.number, headAtStart);
       const review = readReview(rec.reviewFile!);
       const prompt =
         rec.job === "rereview" && rec.previousHead
           ? rereviewPrompt(
               review,
               { previousHead: rec.previousHead, ...(rec.refresh ?? { newHunks: 0, relocated: 0, outdated: 0 }) },
-              { worktree: true, findings: rec.findings },
+              { checkout: true, tools: this.sandbox.kind === "readonly" ? "readonly" : "shell", findings: rec.findings },
             )
           : undefined;
       const run = this.opts.runAi ?? runAi;
       const sessionDir = join(this.config.root, "sessions", rec.owner, rec.repo, `pr-${rec.number}`);
       const result = await run({
         file: rec.reviewFile!,
-        cwd: rec.worktree!,
+        cwd: this.worktrees.mirror(rec.owner, rec.repo),
+        checkout,
+        sandboxPlan: this.sandbox,
         findings: rec.findings,
-        readOnly: true,
         sessionDir,
         log: (line) => this.log(`${key}: ${line}`),
         ...(rec.sessionFile ? { sessionFile: rec.sessionFile } : {}),
