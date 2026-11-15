@@ -1,0 +1,950 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Guided Review file",
+  "type": "object",
+  "required": [
+    "version",
+    "generators",
+    "subject",
+    "patch",
+    "files",
+    "guide",
+    "annotations",
+    "threads",
+    "state"
+  ],
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "version": {
+      "type": "number",
+      "const": 1
+    },
+    "generators": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "tool",
+          "version",
+          "at"
+        ],
+        "properties": {
+          "tool": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          },
+          "at": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "subject": {
+      "type": "object",
+      "required": [
+        "base",
+        "head"
+      ],
+      "properties": {
+        "repo": {
+          "type": "object",
+          "required": [
+            "owner",
+            "name"
+          ],
+          "properties": {
+            "owner": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            }
+          }
+        },
+        "base": {
+          "type": "object",
+          "required": [
+            "sha"
+          ],
+          "properties": {
+            "ref": {
+              "type": "string"
+            },
+            "sha": {
+              "type": "string"
+            }
+          }
+        },
+        "head": {
+          "type": "object",
+          "required": [
+            "sha"
+          ],
+          "properties": {
+            "ref": {
+              "type": "string"
+            },
+            "sha": {
+              "type": "string"
+            }
+          }
+        },
+        "mergeBase": {
+          "type": "string"
+        },
+        "pr": {
+          "type": "object",
+          "required": [
+            "number",
+            "url",
+            "title",
+            "author"
+          ],
+          "properties": {
+            "number": {
+              "type": "integer"
+            },
+            "url": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            },
+            "author": {
+              "type": "string"
+            },
+            "body": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "patch": {
+      "type": "string",
+      "description": "Canonical unified diff (git format)."
+    },
+    "files": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "path",
+          "status",
+          "hunks"
+        ],
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "oldPath": {
+            "type": "string"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "string",
+                "const": "added"
+              },
+              {
+                "type": "string",
+                "const": "modified"
+              },
+              {
+                "type": "string",
+                "const": "deleted"
+              },
+              {
+                "type": "string",
+                "const": "renamed"
+              }
+            ]
+          },
+          "role": {
+            "anyOf": [
+              {
+                "type": "string",
+                "const": "source"
+              },
+              {
+                "type": "string",
+                "const": "test"
+              },
+              {
+                "type": "string",
+                "const": "generated"
+              },
+              {
+                "type": "string",
+                "const": "lockfile"
+              },
+              {
+                "type": "string",
+                "const": "vendored"
+              },
+              {
+                "type": "string",
+                "const": "docs"
+              },
+              {
+                "type": "string",
+                "const": "config"
+              }
+            ]
+          },
+          "binary": {
+            "type": "boolean"
+          },
+          "hunks": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "id",
+                "header",
+                "oldStart",
+                "oldCount",
+                "newStart",
+                "newCount",
+                "rows"
+              ],
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{10}(-[0-9]+)?$",
+                  "description": "Content hash of a hunk: sha1(path + newline + body lines), first 10 hex chars."
+                },
+                "header": {
+                  "type": "string"
+                },
+                "oldStart": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "oldCount": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "newStart": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "newCount": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "rows": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "description": "Body rows, excluding no-newline markers."
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "guide": {
+      "type": "object",
+      "required": [
+        "overview",
+        "generatedBy",
+        "steps"
+      ],
+      "properties": {
+        "overview": {
+          "type": "string"
+        },
+        "generatedBy": {
+          "anyOf": [
+            {
+              "type": "string",
+              "const": "heuristic"
+            },
+            {
+              "type": "string",
+              "const": "ai"
+            },
+            {
+              "type": "string",
+              "const": "manual"
+            }
+          ]
+        },
+        "steps": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "id",
+              "title",
+              "narrative",
+              "items"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "title": {
+                "type": "string",
+                "minLength": 1
+              },
+              "kind": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "const": "context"
+                  },
+                  {
+                    "type": "string",
+                    "const": "core"
+                  },
+                  {
+                    "type": "string",
+                    "const": "wiring"
+                  },
+                  {
+                    "type": "string",
+                    "const": "tests"
+                  },
+                  {
+                    "type": "string",
+                    "const": "mechanical"
+                  },
+                  {
+                    "type": "string",
+                    "const": "generated"
+                  },
+                  {
+                    "type": "string",
+                    "const": "remaining"
+                  }
+                ]
+              },
+              "narrative": {
+                "type": "string",
+                "description": "Markdown explaining what to look for in this step."
+              },
+              "items": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "path",
+                    "hunks"
+                  ],
+                  "properties": {
+                    "path": {
+                      "type": "string"
+                    },
+                    "hunks": {
+                      "anyOf": [
+                        {
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{10}(-[0-9]+)?$",
+                            "description": "Content hash of a hunk: sha1(path + newline + body lines), first 10 hex chars."
+                          }
+                        },
+                        {
+                          "type": "string",
+                          "const": "all"
+                        }
+                      ]
+                    },
+                    "slices": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "required": [
+                          "hunk",
+                          "rows"
+                        ],
+                        "properties": {
+                          "hunk": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{10}(-[0-9]+)?$",
+                            "description": "Content hash of a hunk: sha1(path + newline + body lines), first 10 hex chars."
+                          },
+                          "rows": {
+                            "type": "array",
+                            "additionalItems": false,
+                            "items": [
+                              {
+                                "type": "integer",
+                                "minimum": 0
+                              },
+                              {
+                                "type": "integer",
+                                "minimum": 0
+                              }
+                            ],
+                            "minItems": 2,
+                            "description": "0-based, inclusive range of hunk body rows."
+                          }
+                        }
+                      }
+                    },
+                    "note": {
+                      "type": "string"
+                    }
+                  }
+                }
+              },
+              "dependsOn": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "annotations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "anchor",
+          "body",
+          "source",
+          "createdAt"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "anchor": {
+            "anyOf": [
+              {
+                "type": "object",
+                "required": [
+                  "kind"
+                ],
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "review"
+                  }
+                }
+              },
+              {
+                "type": "object",
+                "required": [
+                  "kind",
+                  "path"
+                ],
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "file"
+                  },
+                  "path": {
+                    "type": "string"
+                  }
+                }
+              },
+              {
+                "type": "object",
+                "required": [
+                  "kind",
+                  "path",
+                  "hunk"
+                ],
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "hunk"
+                  },
+                  "path": {
+                    "type": "string"
+                  },
+                  "hunk": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{10}(-[0-9]+)?$",
+                    "description": "Content hash of a hunk: sha1(path + newline + body lines), first 10 hex chars."
+                  }
+                }
+              },
+              {
+                "type": "object",
+                "required": [
+                  "kind",
+                  "path",
+                  "side",
+                  "start",
+                  "end",
+                  "commit",
+                  "fingerprint"
+                ],
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "lines"
+                  },
+                  "path": {
+                    "type": "string"
+                  },
+                  "side": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "const": "old"
+                      },
+                      {
+                        "type": "string",
+                        "const": "new"
+                      }
+                    ],
+                    "description": "Which side of the diff a line number refers to: old (base) or new (head)."
+                  },
+                  "start": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "First line, 1-based, on the given side."
+                  },
+                  "end": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Last line, inclusive."
+                  },
+                  "hunk": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{10}(-[0-9]+)?$",
+                    "description": "Content hash of a hunk: sha1(path + newline + body lines), first 10 hex chars."
+                  },
+                  "commit": {
+                    "type": "string",
+                    "description": "Commit the line numbers refer to."
+                  },
+                  "fingerprint": {
+                    "type": "string",
+                    "description": "Hash of the anchored lines, used to re-place the anchor."
+                  }
+                }
+              }
+            ]
+          },
+          "body": {
+            "type": "string"
+          },
+          "source": {
+            "anyOf": [
+              {
+                "type": "string",
+                "const": "ai"
+              },
+              {
+                "type": "string",
+                "const": "github"
+              },
+              {
+                "type": "string",
+                "const": "local"
+              }
+            ]
+          },
+          "author": {
+            "type": "object",
+            "required": [
+              "name",
+              "kind"
+            ],
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "kind": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "const": "human"
+                  },
+                  {
+                    "type": "string",
+                    "const": "ai"
+                  }
+                ]
+              }
+            }
+          },
+          "createdAt": {
+            "type": "string"
+          },
+          "outdated": {
+            "type": "boolean"
+          }
+        }
+      }
+    },
+    "threads": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "anchor",
+          "source",
+          "status",
+          "comments"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "anchor": {
+            "anyOf": [
+              {
+                "type": "object",
+                "required": [
+                  "kind"
+                ],
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "review"
+                  }
+                }
+              },
+              {
+                "type": "object",
+                "required": [
+                  "kind",
+                  "path"
+                ],
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "file"
+                  },
+                  "path": {
+                    "type": "string"
+                  }
+                }
+              },
+              {
+                "type": "object",
+                "required": [
+                  "kind",
+                  "path",
+                  "hunk"
+                ],
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "hunk"
+                  },
+                  "path": {
+                    "type": "string"
+                  },
+                  "hunk": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{10}(-[0-9]+)?$",
+                    "description": "Content hash of a hunk: sha1(path + newline + body lines), first 10 hex chars."
+                  }
+                }
+              },
+              {
+                "type": "object",
+                "required": [
+                  "kind",
+                  "path",
+                  "side",
+                  "start",
+                  "end",
+                  "commit",
+                  "fingerprint"
+                ],
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "lines"
+                  },
+                  "path": {
+                    "type": "string"
+                  },
+                  "side": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "const": "old"
+                      },
+                      {
+                        "type": "string",
+                        "const": "new"
+                      }
+                    ],
+                    "description": "Which side of the diff a line number refers to: old (base) or new (head)."
+                  },
+                  "start": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "First line, 1-based, on the given side."
+                  },
+                  "end": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Last line, inclusive."
+                  },
+                  "hunk": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{10}(-[0-9]+)?$",
+                    "description": "Content hash of a hunk: sha1(path + newline + body lines), first 10 hex chars."
+                  },
+                  "commit": {
+                    "type": "string",
+                    "description": "Commit the line numbers refer to."
+                  },
+                  "fingerprint": {
+                    "type": "string",
+                    "description": "Hash of the anchored lines, used to re-place the anchor."
+                  }
+                }
+              }
+            ]
+          },
+          "source": {
+            "anyOf": [
+              {
+                "type": "string",
+                "const": "ai"
+              },
+              {
+                "type": "string",
+                "const": "github"
+              },
+              {
+                "type": "string",
+                "const": "local"
+              }
+            ]
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "string",
+                "const": "open"
+              },
+              {
+                "type": "string",
+                "const": "resolved"
+              },
+              {
+                "type": "string",
+                "const": "outdated"
+              }
+            ]
+          },
+          "severity": {
+            "anyOf": [
+              {
+                "type": "string",
+                "const": "blocker"
+              },
+              {
+                "type": "string",
+                "const": "major"
+              },
+              {
+                "type": "string",
+                "const": "minor"
+              },
+              {
+                "type": "string",
+                "const": "nit"
+              }
+            ]
+          },
+          "category": {
+            "type": "string"
+          },
+          "suggestion": {
+            "type": "object",
+            "required": [
+              "replacement"
+            ],
+            "properties": {
+              "replacement": {
+                "type": "string"
+              }
+            }
+          },
+          "external": {
+            "type": "object",
+            "properties": {
+              "github": {
+                "type": "object",
+                "required": [
+                  "commentIds",
+                  "url"
+                ],
+                "properties": {
+                  "commentIds": {
+                    "type": "array",
+                    "items": {
+                      "type": "integer"
+                    }
+                  },
+                  "url": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          },
+          "comments": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "id",
+                "author",
+                "body",
+                "createdAt"
+              ],
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "author": {
+                  "type": "object",
+                  "required": [
+                    "name",
+                    "kind"
+                  ],
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    },
+                    "kind": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "const": "human"
+                        },
+                        {
+                          "type": "string",
+                          "const": "ai"
+                        }
+                      ]
+                    }
+                  }
+                },
+                "body": {
+                  "type": "string"
+                },
+                "createdAt": {
+                  "type": "string"
+                },
+                "ai": {
+                  "type": "object",
+                  "required": [
+                    "model",
+                    "provider"
+                  ],
+                  "properties": {
+                    "model": {
+                      "type": "string"
+                    },
+                    "provider": {
+                      "type": "string"
+                    },
+                    "session": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "githubId": {
+                  "type": "integer"
+                }
+              }
+            },
+            "minItems": 1
+          }
+        }
+      }
+    },
+    "state": {
+      "type": "object",
+      "required": [
+        "viewed"
+      ],
+      "properties": {
+        "viewed": {
+          "type": "object",
+          "patternProperties": {
+            "^.*$": {
+              "type": "object",
+              "required": [
+                "at"
+              ],
+              "properties": {
+                "at": {
+                  "type": "string"
+                },
+                "by": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "verdict": {
+          "anyOf": [
+            {
+              "type": "string",
+              "const": "approve"
+            },
+            {
+              "type": "string",
+              "const": "request-changes"
+            },
+            {
+              "type": "string",
+              "const": "comment"
+            }
+          ]
+        },
+        "newSinceRefresh": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{10}(-[0-9]+)?$",
+            "description": "Content hash of a hunk: sha1(path + newline + body lines), first 10 hex chars."
+          }
+        }
+      }
+    },
+    "blobs": {
+      "type": "object",
+      "patternProperties": {
+        "^.*$": {
+          "type": "object",
+          "properties": {
+            "old": {
+              "type": "string"
+            },
+            "new": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    }
+  }
+}

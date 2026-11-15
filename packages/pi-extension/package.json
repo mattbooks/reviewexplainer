@@ -1,0 +1,25 @@
+{
+  "name": "@reviewexplainer/pi-extension",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "pi extension: /review command and tools for building a guided review",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "dependencies": {
+    "@reviewexplainer/format": "0.1.0",
+    "@reviewexplainer/core": "0.1.0",
+    "typebox": "1.3.27"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": ">=1.5.0"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "1.5.2"
+  }
+}
