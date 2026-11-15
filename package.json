@@ -8,7 +8,7 @@
   "scripts": {
     "test": "vitest run",
     "test:watch": "vitest",
-    "typecheck": "tsc -p packages/format && tsc -p packages/core && tsc -p packages/cli && tsc -p packages/pi-extension && tsc -p packages/viewer",
+    "typecheck": "tsc -p packages/format && tsc -p packages/core && tsc -p packages/cli && tsc -p packages/pi-extension && tsc -p packages/watch && tsc -p packages/viewer",
     "dev": "npm run dev -w @reviewexplainer/viewer",
     "build": "npm run build -w @reviewexplainer/viewer",
     "greview": "node packages/cli/bin/greview.mjs"

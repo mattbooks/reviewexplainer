@@ -34,6 +34,23 @@ export interface PullRequestInfo {
   headSha: string;
 }
 
+export interface PullRequestDetails extends PullRequestInfo {
+  state: "open" | "closed";
+  merged: boolean;
+  draft: boolean;
+  isFork: boolean;
+  cloneUrl: string;
+  updatedAt: string;
+}
+
+export interface SearchHit {
+  owner: string;
+  repo: string;
+  number: number;
+  updatedAt: string;
+  title: string;
+}
+
 /** The subset of the REST review comment we use. */
 export interface GitHubReviewComment {
   id: number;
@@ -134,6 +151,49 @@ export class GitHubClient {
       headRef: pr.head.ref,
       headSha: pr.head.sha,
     };
+  }
+
+  /** Open or closed state, fork status and clone URL: what `greview watch` needs to decide what to do. */
+  async pullRequestDetails(repo: GitHubRepo, number: number): Promise<PullRequestDetails> {
+    const pr = await this.request<any>("GET", `/repos/${repo.owner}/${repo.name}/pulls/${number}`);
+    const baseRepo = pr.base?.repo?.full_name as string | undefined;
+    const headRepo = pr.head?.repo?.full_name as string | undefined;
+    return {
+      number,
+      title: pr.title,
+      url: pr.html_url,
+      author: pr.user?.login ?? "unknown",
+      baseRef: pr.base.ref,
+      baseSha: pr.base.sha,
+      headRef: pr.head.ref,
+      headSha: pr.head.sha,
+      state: pr.state === "open" ? "open" : "closed",
+      merged: Boolean(pr.merged_at),
+      draft: Boolean(pr.draft),
+      // A deleted fork has no head repo; treat it as a fork too.
+      isFork: !headRepo || headRepo.toLowerCase() !== (baseRepo ?? "").toLowerCase(),
+      cloneUrl: pr.base?.repo?.clone_url ?? `https://github.com/${repo.owner}/${repo.name}.git`,
+      updatedAt: pr.updated_at,
+    };
+  }
+
+  /** Pull requests matching a GitHub search query (`is:pr` is added). Up to `limit` results. */
+  async searchPullRequests(query: string, limit = 300): Promise<SearchHit[]> {
+    const q = /\bis:pr\b|\btype:pr\b/.test(query) ? query : `${query} is:pr`;
+    const out: SearchHit[] = [];
+    for (let page = 1; out.length < limit && page <= 10; page++) {
+      const res = await this.request<{ items: any[] }>(
+        "GET",
+        `/search/issues?q=${encodeURIComponent(q)}&sort=updated&order=desc&per_page=100&page=${page}`,
+      );
+      for (const item of res.items) {
+        const m = /\/repos\/([^/]+)\/([^/]+)$/.exec(item.repository_url ?? "");
+        if (!m || !item.pull_request) continue;
+        out.push({ owner: m[1]!, repo: m[2]!, number: item.number, updatedAt: item.updated_at, title: item.title });
+      }
+      if (res.items.length < 100) break;
+    }
+    return out.slice(0, limit);
   }
 
   pullRequestDiff(repo: GitHubRepo, number: number): Promise<string> {

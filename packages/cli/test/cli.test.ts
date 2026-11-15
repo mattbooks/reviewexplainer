@@ -11,6 +11,8 @@ import { makeRepo } from "../../core/test/helpers.ts";
 import { runAi } from "../src/ai.ts";
 import { main } from "../src/main.ts";
 import { createReviewServer, listen } from "../src/serve.ts";
+import { inboxSource } from "../src/inbox.ts";
+import { StateStore } from "@reviewexplainer/watch";
 
 const cleanups: (() => void)[] = [];
 let home: string;
@@ -145,6 +147,73 @@ describe("greview ai with a scripted model", () => {
   });
 });
 
+describe("resumable AI sessions", () => {
+  it("continues the same pi session for a re-review, without bash", async () => {
+    const root = repo();
+    await main(["init", "main..feature"], { cwd: root });
+    const file = lastLine();
+    const faux = fauxProvider({ provider: "faux", models: [{ id: "scripted" }] });
+    const runtime = await ModelRuntime.create({ authPath: join(home, "auth.json"), modelsPath: null, refreshOnCreate: false });
+    runtime.registerNativeProvider(faux.provider);
+    const seen: { messages: number; tools: string[] }[] = [];
+    const record = (text: string) => (context: any) => {
+      const tools = context.messages.flatMap((m: any) => (m.toolsAdded ?? []).map((t: any) => t.name));
+      seen.push({ messages: context.messages.length, tools });
+      return fauxAssistantMessage([fauxText(text)]);
+    };
+    faux.setResponses([record("First pass done.")]);
+    const first = await runAi({
+      file,
+      cwd: root,
+      findings: true,
+      log: () => {},
+      readOnly: true,
+      sessionDir: join(home, "sessions"),
+      sessionOverrides: { modelRuntime: runtime, model: faux.getModel() },
+    });
+    expect(first.summary).toBe("First pass done.");
+    expect(first.sessionFile).toMatch(/sessions/);
+
+    faux.setResponses([record("Re-review done.")]);
+    const second = await runAi({
+      file,
+      cwd: root,
+      findings: true,
+      log: () => {},
+      readOnly: true,
+      sessionFile: first.sessionFile!,
+      prompt: "The PR was updated and needs a re-review.",
+      sessionOverrides: { modelRuntime: runtime, model: faux.getModel() },
+    });
+    expect(second.sessionFile).toBe(first.sessionFile);
+    expect(second.summary).toBe("Re-review done.");
+    // The second call sees everything from the first run plus the first answer and the new prompt.
+    expect(seen[1]!.messages - seen[0]!.messages).toBe(2);
+    expect(seen[0]!.tools).toContain("review_git_show");
+    expect(seen[0]!.tools).toContain("read");
+    expect(seen[0]!.tools).not.toContain("bash");
+  });
+});
+
+describe("AI failures", () => {
+  it("reports a failed model turn as an error, not a finished review", async () => {
+    const root = repo();
+    await main(["init", "main..feature"], { cwd: root });
+    const file = lastLine();
+    const faux = fauxProvider({ provider: "faux", models: [{ id: "scripted" }] });
+    const runtime = await ModelRuntime.create({ authPath: join(home, "auth.json"), modelsPath: null, refreshOnCreate: false });
+    runtime.registerNativeProvider(faux.provider);
+    faux.setResponses([
+      () => {
+        throw new Error("rate limited");
+      },
+    ]);
+    await expect(
+      runAi({ file, cwd: root, findings: true, log: () => {}, sessionOverrides: { modelRuntime: runtime, model: faux.getModel() } }),
+    ).rejects.toThrow(/The model run failed/);
+  });
+});
+
 describe("greview serve", () => {
   async function serve() {
     const root = repo();
@@ -214,5 +283,62 @@ describe("greview serve", () => {
     const crossSite = await fetch(`${base}/api/review`, { headers: { Origin: "https://evil.example" } });
     expect(crossSite.status).toBe(403);
     expect(readFileSync(file, "utf8")).toContain("Why optional?");
+  });
+});
+
+describe("greview inbox", () => {
+  it("lists watched reviews and serves each by key", async () => {
+    const root = repo();
+    await main(["init", "main..feature"], { cwd: root });
+    const file = lastLine();
+    const store = new StateStore(join(home, "watch"));
+    const at = "2026-11-15T10:00:00Z";
+    store.put({
+      key: "acme/app#7",
+      owner: "acme",
+      repo: "app",
+      number: 7,
+      title: "Add email",
+      url: "https://github.com/acme/app/pull/7",
+      filters: ["mine"],
+      ai: true,
+      findings: true,
+      status: "ready",
+      attempts: 0,
+      reviewFile: file,
+      headSha: "abc",
+      lastSummary: "All good.",
+      createdAt: at,
+      changedAt: at,
+    });
+    store.put({ key: "acme/app#8", owner: "acme", repo: "app", number: 8, title: "Fork", url: "u", filters: [], ai: true, findings: true, status: "skipped", attempts: 0, createdAt: at, changedAt: at });
+    const server = createReviewServer({ source: inboxSource(store), port: 0, viewerDir: join(home, "noviewer") });
+    await listen(server, 0);
+    cleanups.push(() => server.close());
+    const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+    expect(await (await fetch(`${base}/api/info`)).json()).toMatchObject({ mode: "inbox", file: null });
+    const list = (await (await fetch(`${base}/api/reviews`)).json()) as any[];
+    expect(list).toHaveLength(1);
+    expect(list[0]).toMatchObject({ key: "acme/app#7", status: "ready", total: 9, viewed: 0, lastSummary: "All good." });
+
+    expect((await fetch(`${base}/api/review`)).status).toBe(404);
+    const url = `${base}/api/review?key=${encodeURIComponent("acme/app#7")}`;
+    const res = await fetch(url);
+    const etag = res.headers.get("etag")!;
+    expect(res.status).toBe(200);
+    expect((await fetch(url, { headers: { "If-None-Match": etag } })).status).toBe(304);
+
+    const patch = await fetch(url, {
+      method: "PATCH",
+      headers: { "If-Match": etag },
+      body: JSON.stringify([{ op: "add", path: "/state/viewed/file:README.md", value: { at } }]),
+    });
+    expect(patch.status).toBe(200);
+    expect(readReview(file).state.viewed["file:README.md"]).toBeDefined();
+    // A stale etag is refused, and the same edit applies without it (the viewer's merge path).
+    expect((await fetch(url, { method: "PATCH", headers: { "If-Match": etag }, body: "[]" })).status).toBe(409);
+    expect((await fetch(url, { method: "PATCH", body: "[]" })).status).toBe(200);
+    expect((await fetch(`${base}/api/review?key=nope`)).status).toBe(404);
   });
 });

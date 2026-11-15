@@ -7,7 +7,11 @@ export interface Loaded {
   name: string;
   reviewer: string | null;
   warnings: string[];
+  /** Opened from the inbox of `greview watch`. */
+  inbox?: boolean;
 }
+
+export type ServerResult = { kind: "review"; loaded: Loaded } | { kind: "inbox"; reviewer: string | null } | null;
 
 async function textOf(blob: Blob, name: string): Promise<string> {
   if (name.endsWith(".gz") && "DecompressionStream" in globalThis) {
@@ -31,25 +35,27 @@ export function parseReview(text: string): { review: ReviewFile; warnings: strin
   return { review: value as ReviewFile, warnings: [...result.errors, ...result.warnings] };
 }
 
-export async function fromServer(): Promise<Loaded | null> {
-  let res: Response;
+/** Ask `greview serve` / `greview inbox` what it serves. Null when there is no server. */
+export async function fromServer(): Promise<ServerResult> {
+  let info: { mode?: string; reviewer?: string | null; file?: string | null };
   try {
-    res = await fetch("api/review", { headers: { Accept: "application/json" } });
+    const res = await fetch("api/info", { headers: { Accept: "application/json" } });
+    if (!res.ok || !(res.headers.get("content-type") ?? "").includes("json")) return null;
+    info = (await res.json()) as typeof info;
   } catch {
     return null;
   }
-  if (!res.ok || !(res.headers.get("content-type") ?? "").includes("json")) return null;
+  const reviewer = info.reviewer ?? null;
+  const inbox = info.mode === "inbox";
+  const key = new URLSearchParams(location.search).get("key");
+  if (inbox && !key) return { kind: "inbox", reviewer };
+  const url = inbox ? `api/review?key=${encodeURIComponent(key!)}` : "api/review";
+  const res = await fetch(url, { headers: { Accept: "application/json" } });
+  if (res.status === 404) throw new Error(inbox ? `No review for ${key}. It may have been cleaned up after its PR closed.` : "The server has no review file.");
+  if (!res.ok) throw new Error(`Could not load the review: ${res.status}`);
   const { review, warnings } = parseReview(await res.text());
-  let reviewer: string | null = null;
-  let name = "review";
-  try {
-    const info = (await (await fetch("api/info")).json()) as { reviewer?: string | null; file?: string };
-    reviewer = info.reviewer ?? null;
-    name = info.file?.split(/[\\/]/).pop() ?? name;
-  } catch {
-    // info is optional
-  }
-  return { review, backend: serverBackend(res.headers.get("ETag")), name, reviewer, warnings };
+  const name = inbox ? `${key!.replace(/[/#]/g, "-")}.review.json` : (info.file?.split(/[\\/]/).pop() ?? "review.json");
+  return { kind: "review", loaded: { review, backend: serverBackend(res.headers.get("ETag"), url), name, reviewer, warnings, inbox } };
 }
 
 /**

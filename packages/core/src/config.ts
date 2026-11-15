@@ -16,6 +16,8 @@ export interface GreviewConfig {
   reviewer?: string;
   /** Model override for `greview ai`, as provider/model-id. Default: pi's default model. */
   model?: string;
+  /** Settings for `greview watch` (validated by the watch package). User config only. */
+  watch?: unknown;
 }
 
 const DEFAULTS: GreviewConfig = { storage: "cache" };

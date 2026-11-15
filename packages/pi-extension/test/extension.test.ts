@@ -5,11 +5,11 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { initReview, readReview, writeReview } from "@reviewexplainer/core";
 import { parsePatch, validateReview, type ReviewFile } from "@reviewexplainer/format";
 import { makeRepo } from "../../core/test/helpers.ts";
-import { createReviewExtension, parseReviewArgs, reviewPrompt } from "../src/index.ts";
+import { createReviewExtension, parseReviewArgs, rereviewPrompt, reviewPrompt } from "../src/index.ts";
 
 type Registered = { execute: (...args: any[]) => Promise<any>; name: string; parameters: unknown };
 
-function fakePi(flags: Record<string, string> = {}) {
+function fakePi(flags: Record<string, string> = {}, cwd = "/") {
   const tools = new Map<string, Registered>();
   const commands = new Map<string, { handler: (args: string, ctx: any) => Promise<void> }>();
   const messages: string[] = [];
@@ -20,7 +20,7 @@ function fakePi(flags: Record<string, string> = {}) {
     getFlag: (name: string) => flags[name],
     sendUserMessage: (m: string) => messages.push(m),
   };
-  const ctx = { model: { id: "test-model", provider: "faux" }, cwd: "/", hasUI: false };
+  const ctx = { model: { id: "test-model", provider: "faux" }, cwd, hasUI: false };
   const call = async (name: string, params: unknown) => {
     const tool = tools.get(name);
     if (!tool) throw new Error(`no tool ${name}`);
@@ -48,7 +48,7 @@ async function setup() {
   const { review } = await initReview({ cwd: repo.root, range: "main..feature" });
   const file = join(cacheDir, "test.review.json");
   writeReview(file, review);
-  const pi = fakePi();
+  const pi = fakePi({}, repo.root);
   createReviewExtension({ file })(pi.api as any);
   return { pi, file, review, root: repo.root };
 }
@@ -59,10 +59,12 @@ describe("pi extension tools", () => {
     expect([...pi.tools.keys()]).toEqual([
       "review_files",
       "review_show_hunk",
+      "review_git_show",
       "review_set_steps",
       "review_overview",
       "review_annotate",
       "review_comment",
+      "review_resolve",
     ]);
     expect(pi.commands.has("review")).toBe(true);
   });
@@ -152,6 +154,54 @@ describe("pi extension tools", () => {
   });
 });
 
+describe("watch-mode tools", () => {
+  it("reads any file at head or base", async () => {
+    const { pi } = await setup();
+    const head = await pi.call("review_git_show", { path: "src/types.ts" });
+    expect(head).toContain("at head");
+    expect(head).toContain("5 lines");
+    expect(head).toContain("    4    email?: string;");
+    const base = await pi.call("review_git_show", { path: "src/types.ts", rev: "base" });
+    expect(base).not.toContain("email");
+    expect(await pi.call("review_git_show", { path: "README.md" })).toContain("Now with emails.");
+    await expect(pi.call("review_git_show", { path: "nope.ts" })).rejects.toThrow(/does not exist at head/);
+    await expect(pi.call("review_git_show", { path: "src/types.ts", rev: "main; rm -rf /" })).rejects.toThrow(/rev must be/);
+  });
+
+  it("resolves only its own findings, and lists unresolved threads", async () => {
+    const { pi, file } = await setup();
+    await pi.call("review_comment", { path: "src/service.ts", start: 4, body: "Email is not escaped.", severity: "major" });
+    const saved = readReview(file);
+    const aiThread = saved.threads[0]!;
+    writeReview(file, {
+      ...saved,
+      threads: [
+        ...saved.threads,
+        { id: "human_1", source: "local", status: "open", anchor: { kind: "review" }, comments: [{ id: "h", author: { name: "Matt", kind: "human" }, body: "Ship it?", createdAt: "x" }] },
+      ],
+    });
+    const listing = await pi.call("review_files", {});
+    expect(listing).toContain(`[${aiThread.id}] ai major at src/service.ts:4: Email is not escaped.`);
+    expect(listing).toContain("[human_1] local at whole change: Ship it?");
+    await expect(pi.call("review_resolve", { thread: "human_1" })).rejects.toThrow(/Only AI threads/);
+    await pi.call("review_resolve", { thread: aiThread.id, note: "Escaped in the new commit." });
+    const after = readReview(file);
+    expect(after.threads[0]).toMatchObject({ status: "resolved", comments: [{}, { body: "Escaped in the new commit.", author: { kind: "ai" } }] });
+    expect(after.threads[1]!.status).toBe("open");
+  });
+
+  it("does not overwrite edits made by others between tool calls", async () => {
+    const { pi, file } = await setup();
+    await pi.call("review_overview", { summary: "First." });
+    const saved = readReview(file);
+    writeReview(file, { ...saved, state: { viewed: { [saved.files[0]!.hunks[0]?.id ?? "x"]: { at: "now" } } } });
+    await pi.call("review_overview", { summary: "Second." });
+    const after = readReview(file);
+    expect(after.guide.overview).toBe("Second.");
+    expect(Object.keys(after.state.viewed)).toHaveLength(1);
+  });
+});
+
 describe("/review command", () => {
   it("creates a review for a range and asks the agent to build the guide", async () => {
     const repo = makeRepo();
@@ -176,5 +226,16 @@ describe("/review command", () => {
   it("names the head commit in the prompt", async () => {
     const { review } = await setup();
     expect(reviewPrompt(review)).toContain(`git show ${review.subject.head.sha.slice(0, 12)}:<path>`);
+    expect(reviewPrompt(review, { worktree: true })).toContain("checkout of the PR head");
+    expect(reviewPrompt(review, { worktree: true })).not.toContain("bash");
+  });
+
+  it("builds a re-review prompt that points at the previous head", async () => {
+    const { review } = await setup();
+    const text = rereviewPrompt(review, { previousHead: "abcdef1234567890", newHunks: 2, relocated: 1, outdated: 0 }, { worktree: true });
+    expect(text).toContain("head moved from abcdef123456 to");
+    expect(text).toContain('rev "abcdef123456"');
+    expect(text).toContain("2 new or changed hunks are");
+    expect(text).toContain("review_resolve");
   });
 });

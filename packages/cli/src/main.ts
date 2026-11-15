@@ -2,6 +2,7 @@ import { parseArgs } from "node:util";
 import {
   GitHubClient,
   initReview,
+  loadConfig,
   openInBrowser,
   pushPendingReview,
   readReview,
@@ -36,6 +37,17 @@ Usage:
   greview schema
       Print the JSON Schema of the review file.
 
+  greview watch [--once] [--serve [--port N]]
+      Keep a review, in its own worktree, for every open PR matching the filters in
+      ~/.config/greview/config.json ("watch"). New PRs get an AI review; new pushes are
+      re-reviewed in the same AI session; closed PRs are cleaned up. --once runs one pass.
+  greview watch status
+      List watched pull requests.
+  greview watch clean
+      Remove closed and paused reviews and orphaned worktrees now.
+  greview inbox [--port N] [--no-open]
+      Open the viewer with every watched review.
+
 FILE defaults to the newest review for the current checkout in the configured storage
 (.greview.json or ~/.config/greview/config.json; storage: cache | repo | path).
 GitHub access uses GITHUB_TOKEN, GH_TOKEN or \`gh auth token\`.
@@ -66,6 +78,8 @@ export async function main(argv: string[], env: { cwd?: string } = {}): Promise<
       "no-open": { type: "boolean" },
       port: { type: "string" },
       head: { type: "string" },
+      once: { type: "boolean" },
+      serve: { type: "boolean" },
       help: { type: "boolean", short: "h" },
       version: { type: "boolean", short: "v" },
     },
@@ -99,7 +113,7 @@ export async function main(argv: string[], env: { cwd?: string } = {}): Promise<
       log(`Wrote ${review.files.length} files, ${hunks} hunks in ${review.guide.steps.length} steps.`);
       if (values.ai) {
         const { runAi } = await import("./ai.ts");
-        await runAi({ file, cwd, findings: !values["no-findings"], log, ...(values.model ? { model: values.model } : {}) });
+        await runAi({ file, cwd, findings: !values["no-findings"], log, stream: true, ...(values.model ? { model: values.model } : {}) });
       }
       out(file);
       return 0;
@@ -110,7 +124,7 @@ export async function main(argv: string[], env: { cwd?: string } = {}): Promise<
       const { runAi } = await import("./ai.ts");
       const ctx = await repoContext(cwd);
       const model = values.model ?? ctx.config.model;
-      await runAi({ file, cwd: ctx.root ?? cwd, findings: !values["no-findings"], log, ...(model ? { model } : {}) });
+      await runAi({ file, cwd: ctx.root ?? cwd, findings: !values["no-findings"], log, stream: true, ...(model ? { model } : {}) });
       const review = readReview(file);
       const ai = review.threads.filter((t) => t.source === "ai").length;
       log(`Guide: ${review.guide.steps.length} steps. AI threads: ${ai}. Notes: ${review.annotations.length}.`);
@@ -194,6 +208,74 @@ export async function main(argv: string[], env: { cwd?: string } = {}): Promise<
       return 0;
     }
 
+    case "watch": {
+      const { loadWatchConfig, Watcher } = await import("@reviewexplainer/watch");
+      const config = loadWatchConfig();
+      const sub = args[0];
+      if (sub === "status") {
+        const { StateStore } = await import("@reviewexplainer/watch");
+        const records = new StateStore(config.root).all();
+        if (records.length === 0) out("Nothing watched yet. Run `greview watch`.");
+        for (const r of records) {
+          const head = r.headSha ? r.headSha.slice(0, 8) : "--------";
+          const extra = r.pendingHead ? ` (new push ${r.pendingHead.slice(0, 8)} waiting)` : r.lastError ? ` (${r.lastError.split("\n")[0]})` : r.skipReason ? ` (${r.skipReason})` : "";
+          out(`${r.status.padEnd(9)} ${head} ${r.key}  ${r.title}${extra}`);
+        }
+        return 0;
+      }
+      const client = await GitHubClient.create();
+      const watcher = new Watcher({ config, client, log: (l) => log(`${new Date().toLocaleTimeString()} ${l}`) });
+      if (sub === "clean") {
+        const purged = await watcher.clean();
+        out(purged.length ? `Removed ${purged.join(", ")}` : "Nothing to clean.");
+        return 0;
+      }
+      if (sub) bad(`Unknown watch command "${sub}". Use status or clean.`);
+      if (values.once) {
+        await watcher.recover();
+        const s = await watcher.tick();
+        await watcher.drain();
+        out(
+          `${s.matched} matching: ${s.started.length} new, ${s.refreshed.length} updated, ${s.queued.length} AI runs, ${s.closed.length} closed, ${s.paused.length} paused, ${s.skipped.length} skipped`,
+        );
+        return 0;
+      }
+      const controller = new AbortController();
+      const stop = () => {
+        log("Stopping; interrupted AI runs resume next time.");
+        controller.abort();
+        setTimeout(() => process.exit(0), 200).unref();
+      };
+      process.once("SIGINT", stop);
+      process.once("SIGTERM", stop);
+      if (values.serve) {
+        const { createReviewServer, listen } = await import("./serve.ts");
+        const { inboxSource } = await import("./inbox.ts");
+        const server = createReviewServer({ source: inboxSource(watcher.state), port: 0, ...(loadReviewer() ? { reviewer: loadReviewer()! } : {}) });
+        const port = await listen(server, values.port ? Number(values.port) : 4173);
+        log(`Inbox: http://127.0.0.1:${port}/`);
+        controller.signal.addEventListener("abort", () => server.close());
+      }
+      log(`Watching ${config.filters.map((f) => `"${f.name}"`).join(", ")} every ${config.intervalSeconds}s. Ctrl-C to stop.`);
+      await watcher.run(controller.signal);
+      return 0;
+    }
+
+    case "inbox": {
+      const { loadWatchConfig, StateStore } = await import("@reviewexplainer/watch");
+      const { createReviewServer, listen } = await import("./serve.ts");
+      const { inboxSource } = await import("./inbox.ts");
+      const config = loadWatchConfig();
+      const reviewer = loadReviewer();
+      const server = createReviewServer({ source: inboxSource(new StateStore(config.root)), port: 0, ...(reviewer ? { reviewer } : {}) });
+      const port = await listen(server, values.port ? Number(values.port) : 4173);
+      const url = `http://127.0.0.1:${port}/`;
+      out(url);
+      if (!values["no-open"]) await openInBrowser(url);
+      await new Promise(() => {});
+      return 0;
+    }
+
     case "path": {
       out(await locateReview(cwd, args[0]));
       return 0;
@@ -206,6 +288,14 @@ export async function main(argv: string[], env: { cwd?: string } = {}): Promise<
 
     default:
       bad(`Unknown command "${command}". Run greview help.`);
+  }
+}
+
+function loadReviewer(): string | undefined {
+  try {
+    return loadConfig(undefined).reviewer;
+  } catch {
+    return undefined;
   }
 }
 
