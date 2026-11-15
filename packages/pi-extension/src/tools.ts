@@ -4,6 +4,7 @@
  * to the model as tool errors it can fix.
  */
 import { Type, type Static } from "typebox";
+import { git } from "@reviewexplainer/core";
 import {
   coverage,
   coverageProblems,
@@ -28,6 +29,8 @@ export interface ReviewSession {
   save(next: ReviewFile): void;
   /** Model info for AI-authored comments. */
   ai(): { model: string; provider: string } | undefined;
+  /** Working directory of the agent (a checkout of the repository). */
+  cwd(): string;
 }
 
 export interface ToolResult {
@@ -41,7 +44,7 @@ export interface ReviewTool<P extends ReturnType<typeof Type.Object>> {
   description: string;
   promptSnippet: string;
   parameters: P;
-  run(session: ReviewSession, params: Static<P>): ToolResult;
+  run(session: ReviewSession, params: Static<P>): ToolResult | Promise<ToolResult>;
 }
 
 const text = (t: string, details: Record<string, unknown> = {}): ToolResult => ({
@@ -130,6 +133,16 @@ export const reviewFilesTool: ReviewTool<typeof filesParams> = {
     lines.push("", `Guide (${review.guide.generatedBy}):`);
     for (const [i, s] of review.guide.steps.entries()) {
       lines.push(`${i + 1}. [${s.id}] ${s.title}: ${s.items.map((it) => it.path).join(", ")}`);
+    }
+    const threads = review.threads.filter((t) => t.status !== "resolved");
+    if (threads.length) {
+      lines.push("", "Unresolved threads:");
+      for (const t of threads) {
+        const a = t.anchor;
+        const where = a.kind === "lines" ? `${a.path}:${a.start}${a.end !== a.start ? `-${a.end}` : ""}` : a.kind === "review" ? "whole change" : a.path;
+        const first = t.comments[0]!.body.replace(/\s+/g, " ").slice(0, 100);
+        lines.push(`- [${t.id}] ${t.source}${t.severity ? ` ${t.severity}` : ""}${t.status === "outdated" ? " (outdated: its lines changed)" : ""} at ${where}: ${first}`);
+      }
     }
     return text(lines.join("\n"), { files: review.files.length });
   },
@@ -301,11 +314,84 @@ export const reviewCommentTool: ReviewTool<typeof commentParams> = {
   },
 };
 
+const MAX_SHOW_LINES = 400;
+const gitShowParams = Type.Object({
+  path: Type.String({ description: "Repository-relative file path." }),
+  rev: Type.Optional(
+    Type.String({ description: 'Revision: "head" (default), "base" (the merge base), or a commit sha from this review.' }),
+  ),
+  offset: Type.Optional(Type.Integer({ minimum: 1, description: "First line to show (default 1)." })),
+});
+export const reviewGitShowTool: ReviewTool<typeof gitShowParams> = {
+  name: "review_git_show",
+  label: "Show file at revision",
+  description: `Read a file as it is at the PR head or at the base, with line numbers, ${MAX_SHOW_LINES} lines at a time. Works for any file in the repository, not only changed ones. Read-only.`,
+  promptSnippet: "Read any file at the head or base commit",
+  parameters: gitShowParams,
+  async run(session, p) {
+    const review = session.get();
+    const rev = p.rev ?? "head";
+    const sha =
+      rev === "head" ? review.subject.head.sha : rev === "base" ? (review.subject.mergeBase ?? review.subject.base.sha) : rev;
+    if (!/^[0-9a-f]{7,40}$/.test(sha)) throw new Error('rev must be "head", "base" or a commit sha');
+    if (p.path.startsWith("-") || p.path.includes("..")) throw new Error("path must be a plain repository path");
+    let content: string;
+    try {
+      content = await git(session.cwd(), "show", `${sha}:${p.path}`);
+    } catch {
+      throw new Error(`${p.path} does not exist at ${rev} (${sha.slice(0, 12)})`);
+    }
+    const lines = content.split("\n");
+    if (lines.length > 1 && lines[lines.length - 1] === "") lines.pop();
+    const start = p.offset ?? 1;
+    const slice = lines.slice(start - 1, start - 1 + MAX_SHOW_LINES);
+    const body = slice.map((l, i) => `${String(start + i).padStart(5)}  ${l}`).join("\n");
+    const more = start - 1 + MAX_SHOW_LINES < lines.length ? `\n… ${lines.length - (start - 1 + MAX_SHOW_LINES)} more lines; call again with offset ${start + MAX_SHOW_LINES}` : "";
+    return text(`${p.path} at ${rev} (${sha.slice(0, 12)}), ${lines.length} lines\n${body}${more}`);
+  },
+};
+
+const resolveParams = Type.Object({
+  thread: Type.String({ description: "Id of one of your own (AI) threads." }),
+  note: Type.Optional(Type.String({ description: "One line on why it is resolved, e.g. which commit fixed it." })),
+});
+export const reviewResolveTool: ReviewTool<typeof resolveParams> = {
+  name: "review_resolve",
+  label: "Resolve finding",
+  description: "Mark one of your own earlier findings resolved because the code no longer has the problem. Only AI threads can be resolved this way.",
+  promptSnippet: "Resolve one of your earlier findings that has been fixed",
+  parameters: resolveParams,
+  run(session, p) {
+    const review = session.get();
+    const t = review.threads.find((x) => x.id === p.thread);
+    if (!t) throw new Error(`No thread ${p.thread}`);
+    if (t.source !== "ai") throw new Error("Only AI threads can be resolved with this tool; leave human threads to people");
+    const ai = session.ai();
+    const comments = p.note
+      ? [
+          ...t.comments,
+          {
+            id: newId("c"),
+            author: { name: ai ? `${ai.provider}/${ai.model}` : "AI", kind: "ai" as const },
+            body: p.note,
+            createdAt: nowIso(),
+            ...(ai ? { ai } : {}),
+          },
+        ]
+      : t.comments;
+    session.save({ ...review, threads: review.threads.map((x) => (x.id === t.id ? { ...x, status: "resolved" as const, comments } : x)) });
+    return text(`Thread ${t.id} resolved.`);
+  },
+};
+
+
 export const ALL_TOOLS = [
   reviewFilesTool,
   reviewShowHunkTool,
+  reviewGitShowTool,
   reviewSetStepsTool,
   reviewOverviewTool,
   reviewAnnotateTool,
   reviewCommentTool,
+  reviewResolveTool,
 ] as const;

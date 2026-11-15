@@ -70,6 +70,8 @@ export interface InitOptions {
   pr?: number;
   withBlobs?: boolean;
   client?: GitHubClient;
+  /** The GitHub repository, when the checkout's origin does not name it (e.g. a mirror). */
+  repo?: GitHubRepo;
 }
 
 export interface InitResult {
@@ -87,7 +89,7 @@ export function parseRange(range: string | undefined): { base?: string; head?: s
 
 export async function initReview(opts: InitOptions): Promise<InitResult> {
   const root = await repoRoot(opts.cwd);
-  const repo = await githubRepo(root);
+  const repo = opts.repo ?? (await githubRepo(root));
   let subject: Subject;
   let patch: string;
 

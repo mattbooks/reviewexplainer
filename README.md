@@ -40,6 +40,7 @@ Try the viewer on the bundled example: `greview serve examples/session-expiry.re
 | `greview refresh [FILE] [--head REF]` | Re-diffs against the latest head. Keeps steps for unchanged hunks, collects new hunks in "Remaining changes", re-anchors threads by fingerprint and marks the rest outdated. |
 | `greview serve [FILE] [--port N] [--no-open]` | Serves the viewer on localhost; comments and viewed state save straight back to the file. |
 | `greview validate FILE...` | Checks files against the format rules. |
+| `greview watch [--once] [--serve]`, `greview inbox` | Keeps reviews for PRs matching GitHub search filters, in worktrees (see [Watching GitHub](#watching-github)). |
 | `greview path [FILE]`, `greview schema` | Prints the file greview would use, or the JSON Schema. |
 
 `FILE` defaults to the newest review in the storage folder that matches the current checkout.
@@ -79,6 +80,8 @@ Load the extension with `pi -e /path/to/reviewexplainer/packages/pi-extension/sr
 | `review_overview` | Sets the overview |
 | `review_annotate` | Adds an explanatory note anchored to code |
 | `review_comment` | Adds a finding with severity, category and an optional suggested change |
+| `review_git_show` | Reads any file at the head or base commit, with line numbers |
+| `review_resolve` | Resolves one of the AI's own earlier findings once it is fixed |
 
 Every tool validates against the patch and saves the file, so a bad anchor or a missed hunk comes back to the model as an error it can fix.
 
@@ -98,6 +101,71 @@ It runs in two modes from the same build:
 **GitHub Pages.** `.github/workflows/pages.yml` deploys the viewer and the example review on every push to `main`. Turn it on under Settings → Pages → Source: GitHub Actions. A Pages site is public even when the repository is private (and a private repository needs a paid plan for Pages), so the workflow never publishes real reviews: open those from the site with "Open a review file", where they stay in your browser.
 
 On phone-sized screens the steps sit above the code, long lines wrap, and the view stays unified.
+
+## Watching GitHub
+
+`greview watch` keeps a review for every open pull request matching your GitHub search filters, each in its own git worktree so the AI can read any file in the repository, not just the diff.
+
+Add filters to `~/.config/greview/config.json`:
+
+```json
+{
+  "reviewer": "Matt",
+  "watch": {
+    "filters": [
+      { "name": "requested", "query": "is:open review-requested:@me -is:draft" },
+      { "name": "team app", "query": "is:open repo:acme/app label:needs-review", "findings": false }
+    ],
+    "intervalSeconds": 120,
+    "settleSeconds": 180,
+    "concurrency": 1,
+    "retainDays": 7
+  }
+}
+```
+
+Then run `greview watch --serve` and open the inbox it prints (or run `greview inbox` separately).
+
+| Event | What happens |
+| --- | --- |
+| A PR starts matching a filter | A bare clone per repository (shared object store) gets a worktree at the PR head; the review file is created, GitHub comments are synced, and an AI review is queued. |
+| Comments or other activity | GitHub threads are synced into the review file. |
+| New commits | After `settleSeconds` without further pushes, the worktree moves to the new head, the review is refreshed (new hunks, re-anchored threads), and the **same AI session** is resumed with a prompt saying the PR was updated and needs a re-review. The agent re-files the new hunks, resolves its own findings that were fixed, and reviews the new code. |
+| The PR stops matching but is still open | Paused; the worktree is kept. It resumes if it matches again. |
+| The PR is closed or merged | The worktree and its refs are removed at once; the review file and AI session are kept for `retainDays`, then deleted. |
+| A PR from a fork | Skipped. |
+
+Other commands: `greview watch --once` (one pass, then exit), `greview watch status`, `greview watch clean` (remove closed and paused reviews and orphaned worktrees now).
+
+Everything lives under `~/.cache/greview/watch/` (`repos/`, `worktrees/`, `sessions/`, `state/`); review files go to `~/.cache/greview/<owner>/<repo>/pr-<n>.review.json`. A restart picks up where it left off: interrupted AI runs are queued again and orphaned worktrees are removed. Failed runs are retried up to three times, ten minutes apart.
+
+**What the agent can do.** Watched PRs contain code and comments written by other people, so the agent only gets read, grep, find, ls, `review_git_show` and the review tools: no shell, no network, and it never builds or runs the code. The worktree is reset before every run, and watch settings come only from your user config, never from a repository.
+
+**Running it at login (macOS).** Save as `~/Library/LaunchAgents/dev.greview.watch.plist`, adjust the paths, then `launchctl load ~/Library/LaunchAgents/dev.greview.watch.plist`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>dev.greview.watch</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/bin/node</string>
+    <string>/Users/you/code/reviewexplainer/packages/cli/bin/greview.mjs</string>
+    <string>watch</string>
+    <string>--serve</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardErrorPath</key><string>/Users/you/Library/Logs/greview-watch.log</string>
+  <key>EnvironmentVariables</key>
+  <dict><key>PATH</key><string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string></dict>
+</dict>
+</plist>
+```
+
+`gh` must be on that `PATH` (for the token) and logged in, and git must be able to fetch your private repositories (e.g. `gh auth setup-git`).
 
 ## The file format
 
@@ -131,8 +199,9 @@ npx tsx examples/make-example.ts   # regenerate the example review
 | --- | --- |
 | `packages/format` | Schema, types, patch parser, sub-patches, anchors, validator. No Node or DOM dependencies. |
 | `packages/core` | git and GitHub collection, rule-based ordering, sync, push, refresh, storage |
-| `packages/pi-extension` | `/review` command and review tools |
-| `packages/cli` | `greview` |
+| `packages/pi-extension` | `/review` command, review tools, and the headless agent runner (resumable sessions) |
+| `packages/watch` | `greview watch`: filters, worktrees, state, AI queue, cleanup |
+| `packages/cli` | `greview`, the local server and the inbox |
 | `packages/viewer` | The web app |
 
 The CLI and extension run their TypeScript sources directly (through `tsx` and pi's loader), so only the viewer needs a build.

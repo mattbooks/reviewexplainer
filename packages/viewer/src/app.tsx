@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { CodeView, type CodeViewHandle, type DiffLineAnnotation, type SelectedLineRange } from "@pierre/diffs/react";
 import { fromPierreSide, makeLinesAnchor, type Anchor, type ReviewFile, type Source, type Step } from "@reviewexplainer/format";
 import { Composer, Files, NoteCard, Route, StepIntro, ThreadCard, Welcome } from "./components.tsx";
+import { Inbox } from "./inbox.tsx";
 import { fromBundled, fromFile, fromServer, fromUrl, type Loaded } from "./load.ts";
 import { Markdown } from "./markdown.tsx";
 import {
@@ -28,7 +29,7 @@ import {
 
 export function App() {
   const [loaded, setLoaded] = useState<Loaded | null>(null);
-  const [phase, setPhase] = useState<"loading" | "welcome" | "ready">("loading");
+  const [phase, setPhase] = useState<"loading" | "welcome" | "ready" | "inbox">("loading");
   const [error, setError] = useState<string>();
 
   const open = useCallback(async (load: () => Promise<Loaded>) => {
@@ -50,7 +51,12 @@ export function App() {
     }
     void (async () => {
       try {
-        const local = (await fromServer()) ?? (await fromBundled());
+        const server = await fromServer();
+        if (server?.kind === "inbox") {
+          setPhase("inbox");
+          return;
+        }
+        const local = server?.kind === "review" ? server.loaded : await fromBundled();
         if (local) {
           setLoaded(local);
           setPhase("ready");
@@ -63,6 +69,7 @@ export function App() {
   }, [open]);
 
   if (phase === "loading") return <p className="loading">Loading the review…</p>;
+  if (phase === "inbox") return <Inbox />;
   if (phase === "welcome" || !loaded) {
     return (
       <Welcome
@@ -138,7 +145,14 @@ function Reviewer({ loaded }: { loaded: Loaded }) {
       }
       setSave({ kind: "saving" });
       backend.persist(ops, next).then(
-        () => setSave({ kind: "saved" }),
+        (result) => {
+          setSave({ kind: "saved" });
+          // The server merged our edit into a newer file: show that file.
+          if (result?.merged && !backend.pending) {
+            reviewRef.current = result.merged;
+            setReview(result.merged);
+          }
+        },
         (e: Error) => setSave({ kind: "error", message: e instanceof ConflictError ? e.message : `Not saved: ${e.message}` }),
       );
     },
@@ -297,11 +311,33 @@ function Reviewer({ loaded }: { loaded: Loaded }) {
 
   const reload = async () => {
     const fresh = await fromServer();
-    if (fresh) {
-      setReview(fresh.review);
+    if (fresh?.kind === "review") {
+      reviewRef.current = fresh.loaded.review;
+      setReview(fresh.loaded.review);
       setSave({ kind: "saved" });
     }
   };
+
+  // Pick up changes others make to the file: `greview watch` syncing GitHub
+  // comments or an AI review finishing while this tab is open.
+  const [updatedAt, setUpdatedAt] = useState<Date | null>(null);
+  useEffect(() => {
+    if (!backend.poll) return;
+    const timer = window.setInterval(async () => {
+      if (document.hidden) return;
+      try {
+        const doc = await backend.poll!();
+        if (doc && !backend.pending) {
+          reviewRef.current = doc;
+          setReview(doc);
+          setUpdatedAt(new Date());
+        }
+      } catch {
+        // offline for a moment; try again next time
+      }
+    }, 15_000);
+    return () => window.clearInterval(timer);
+  }, [backend]);
 
   const threadProps = (id: string) => {
     const t = threadsById.get(id)!;
@@ -448,7 +484,17 @@ function Reviewer({ loaded }: { loaded: Loaded }) {
             {viewedCount}/{allKeys.length}
           </span>
         </div>
+        {loaded.inbox ? (
+          <a className="inbox-link" href="./">
+            Inbox
+          </a>
+        ) : null}
         <p className="topbar-title">{title}</p>
+        {updatedAt ? (
+          <span className="updated" title={updatedAt.toLocaleString()}>
+            Updated {updatedAt.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}
+          </span>
+        ) : null}
         <fieldset className="filters">
           <legend className="sr-only">Show comments from</legend>
           {SOURCES.map((s) => (

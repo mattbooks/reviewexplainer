@@ -49,8 +49,23 @@ async function readBody(req: IncomingMessage, limit = 50 * 1024 * 1024): Promise
   return Buffer.concat(chunks).toString("utf8");
 }
 
+/** Where reviews come from: one file, or the inbox of everything `greview watch` tracks. */
+export interface ReviewSource {
+  mode: "local" | "inbox";
+  /** The review file for a key (inbox), or the single file. */
+  resolve(key: string | null): string | undefined;
+  /** Inbox entries for GET /api/reviews. */
+  list?(): unknown[];
+}
+
+export function singleFile(file: string): ReviewSource {
+  return { mode: "local", resolve: () => file };
+}
+
 export interface ServeOptions {
-  file: string;
+  /** Serve one file (same as `source: singleFile(file)`). */
+  file?: string;
+  source?: ReviewSource;
   port: number;
   host?: string;
   viewerDir?: string;
@@ -58,6 +73,8 @@ export interface ServeOptions {
 }
 
 export function createReviewServer(opts: ServeOptions): Server {
+  const source = opts.source ?? (opts.file ? singleFile(opts.file) : undefined);
+  if (!source) throw new Error("createReviewServer needs a file or a source");
   const viewerDir = resolve(opts.viewerDir ?? defaultViewerDir());
   const hasViewer = existsSync(join(viewerDir, "index.html"));
 
@@ -72,45 +89,66 @@ export function createReviewServer(opts: ServeOptions): Server {
       }
 
       if (url.pathname === "/api/info" && req.method === "GET") {
-        return send(res, 200, JSON.stringify({ mode: "local", file: opts.file, reviewer: opts.reviewer ?? null }));
+        return send(
+          res,
+          200,
+          JSON.stringify({ mode: source.mode, file: source.mode === "local" ? source.resolve(null) : null, reviewer: opts.reviewer ?? null }),
+        );
       }
 
-      if (url.pathname === "/api/review" && req.method === "GET") {
-        const text = serializeReview(readReview(opts.file));
-        return send(res, 200, text, undefined, { ETag: etagFor(text) });
+      if (url.pathname === "/api/reviews" && req.method === "GET") {
+        if (!source.list) return send(res, 404, JSON.stringify({ error: "Not an inbox" }));
+        return send(res, 200, JSON.stringify(source.list()));
       }
 
-      if (url.pathname === "/api/review" && req.method === "PATCH") {
-        const current = readReview(opts.file);
-        const currentTag = etagFor(serializeReview(current));
-        const ifMatch = req.headers["if-match"];
-        if (ifMatch && ifMatch !== currentTag) {
-          return send(res, 409, JSON.stringify({ error: "The review file changed on disk; reload to get the latest version." }), undefined, {
-            ETag: currentTag,
-          });
-        }
-        let ops: JsonPatchOp[];
-        try {
-          ops = JSON.parse(await readBody(req)) as JsonPatchOp[];
-          if (!Array.isArray(ops)) throw new Error("Body must be a JSON Patch array");
-          for (const op of ops) {
-            const root = parsePointer(op.path)[0];
-            if (!root || !EDITABLE_ROOTS.has(root)) throw new Error(`Only /threads and /state can be edited, not ${op.path}`);
+      if (url.pathname === "/api/review") {
+        const file = source.resolve(url.searchParams.get("key"));
+        if (!file || !existsSync(file)) return send(res, 404, JSON.stringify({ error: "No such review" }));
+
+        if (req.method === "GET") {
+          const text = serializeReview(readReview(file));
+          const tag = etagFor(text);
+          if (req.headers["if-none-match"] === tag) {
+            res.writeHead(304, { ETag: tag, "Cache-Control": "no-store" });
+            return res.end();
           }
-        } catch (e) {
-          return send(res, 400, JSON.stringify({ error: (e as Error).message }));
+          return send(res, 200, text, undefined, { ETag: tag });
         }
-        let next: ReviewFile;
-        try {
-          next = applyJsonPatch(current, ops);
-        } catch (e) {
-          return send(res, 409, JSON.stringify({ error: (e as Error).message }));
+
+        if (req.method === "PATCH") {
+          let ops: JsonPatchOp[];
+          try {
+            ops = JSON.parse(await readBody(req)) as JsonPatchOp[];
+            if (!Array.isArray(ops)) throw new Error("Body must be a JSON Patch array");
+            for (const op of ops) {
+              const root = parsePointer(op.path)[0];
+              if (!root || !EDITABLE_ROOTS.has(root)) throw new Error(`Only /threads and /state can be edited, not ${op.path}`);
+            }
+          } catch (e) {
+            return send(res, 400, JSON.stringify({ error: (e as Error).message }));
+          }
+          // Read, apply and write with no await in between, so writes from
+          // `greview watch` or an agent cannot interleave.
+          const current = readReview(file);
+          const currentTag = etagFor(serializeReview(current));
+          const ifMatch = req.headers["if-match"];
+          if (ifMatch && ifMatch !== currentTag) {
+            return send(res, 409, JSON.stringify({ error: "The review file changed on disk; reload to get the latest version." }), undefined, {
+              ETag: currentTag,
+            });
+          }
+          let next: ReviewFile;
+          try {
+            next = applyJsonPatch(current, ops);
+          } catch (e) {
+            return send(res, 409, JSON.stringify({ error: (e as Error).message }));
+          }
+          const result = validateReview(next);
+          if (!result.ok) return send(res, 422, JSON.stringify({ error: "Invalid review after edit", details: result.errors }));
+          writeReview(file, next);
+          const text = serializeReview(next);
+          return send(res, 200, text, undefined, { ETag: etagFor(text) });
         }
-        const result = validateReview(next);
-        if (!result.ok) return send(res, 422, JSON.stringify({ error: "Invalid review after edit", details: result.errors }));
-        writeReview(opts.file, next);
-        const text = serializeReview(next);
-        return send(res, 200, text, undefined, { ETag: etagFor(text) });
       }
 
       if (url.pathname.startsWith("/api/")) return send(res, 404, JSON.stringify({ error: "Not found" }));

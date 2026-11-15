@@ -941,3 +941,156 @@ button.quiet:hover {
     transition: none;
   }
 }
+
+/* ---------- Inbox ---------- */
+
+.inbox {
+  max-width: 860px;
+  margin: 0 auto;
+  padding: 40px 24px 80px;
+  height: 100%;
+  overflow: auto;
+}
+
+.inbox-head h1 {
+  font-family: var(--serif);
+  font-size: 32px;
+  font-weight: 600;
+  margin: 0;
+  letter-spacing: -0.01em;
+}
+
+.inbox-head p {
+  color: var(--muted);
+  margin: 4px 0 24px;
+}
+
+.inbox-sub {
+  font-family: var(--serif);
+  font-size: 19px;
+  font-weight: 600;
+  margin: 32px 0 8px;
+  color: var(--muted);
+}
+
+.inbox-empty {
+  color: var(--muted);
+  font-size: 15px;
+}
+
+.inbox-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.inbox-row {
+  display: flex;
+  gap: 14px;
+  padding: 14px 4px;
+  border-bottom: 1px solid var(--rule);
+}
+
+/* Same language as the route: a hollow stop that fills when done. */
+.inbox-marker {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  margin-top: 4px;
+  border-radius: 50%;
+  border: 3px solid var(--rule);
+  background: var(--paper);
+}
+
+.inbox-row[data-status="ready"] .inbox-marker {
+  border-color: var(--route);
+}
+
+.inbox-row[data-done] .inbox-marker {
+  background: var(--route);
+  border-color: var(--route);
+}
+
+.inbox-row[data-status="reviewing"] .inbox-marker,
+.inbox-row[data-status="queued"] .inbox-marker,
+.inbox-row[data-status="preparing"] .inbox-marker {
+  border-color: var(--ai);
+  border-style: dashed;
+}
+
+.inbox-row[data-status="failed"] .inbox-marker {
+  border-color: var(--blocker);
+}
+
+.inbox-row[data-status="closed"],
+.inbox-row[data-status="paused"] {
+  opacity: 0.65;
+}
+
+.inbox-body {
+  min-width: 0;
+  flex: 1;
+}
+
+.inbox-title {
+  font-weight: 600;
+  font-size: 15.5px;
+  text-decoration: none;
+}
+
+.inbox-title:hover {
+  text-decoration: underline;
+}
+
+.inbox-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.inbox-status {
+  color: var(--ink);
+}
+
+.inbox-row[data-status="reviewing"] .inbox-status,
+.inbox-row[data-status="queued"] .inbox-status {
+  color: var(--ai);
+}
+
+.inbox-row[data-status="failed"] .inbox-status,
+.inbox-error {
+  color: var(--blocker);
+}
+
+.inbox-open {
+  color: var(--major);
+}
+
+.inbox-summary {
+  margin: 6px 0 0;
+  font-family: var(--serif);
+  font-size: 14.5px;
+  max-width: 72ch;
+}
+
+.inbox-error {
+  margin: 6px 0 0;
+  font-size: 13px;
+}
+
+.inbox-link {
+  color: var(--route);
+  font-weight: 600;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.updated {
+  color: var(--muted);
+  font-size: 12.5px;
+  white-space: nowrap;
+}

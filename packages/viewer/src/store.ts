@@ -69,38 +69,76 @@ export type SaveState = { kind: "saved" } | { kind: "saving" } | { kind: "unsave
 
 export interface Backend {
   label: string;
-  /** Persist ops that were already applied locally. Resolves with the server's copy, if any. */
-  persist(ops: JsonPatchOp[], after: ReviewFile): Promise<ReviewFile | void>;
+  /**
+   * Persist ops that were already applied locally. Resolves with the server's
+   * copy when the server had to merge them into a newer file.
+   */
+  persist(ops: JsonPatchOp[], after: ReviewFile): Promise<{ merged: ReviewFile } | void>;
   /** True when edits are kept only in memory until exported. */
   readonly memoryOnly: boolean;
   canSaveInPlace?: boolean;
   saveInPlace?(review: ReviewFile): Promise<void>;
+  /** The file's newer version, if it changed on disk (e.g. `greview watch` wrote to it); else null. */
+  poll?(): Promise<ReviewFile | null>;
+  /** Edits still being sent. */
+  readonly pending?: number;
 }
 
 export class ConflictError extends Error {}
 
-export function serverBackend(initialEtag: string | null): Backend {
+export function serverBackend(initialEtag: string | null, url = "api/review"): Backend {
   let etag = initialEtag;
-  let queue = Promise.resolve<ReviewFile | void>(undefined);
+  let pending = 0;
+  let queue: Promise<unknown> = Promise.resolve();
+  const send = (ops: JsonPatchOp[], ifMatch: string | null) =>
+    fetch(url, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", ...(ifMatch ? { "If-Match": ifMatch } : {}) },
+      body: JSON.stringify(ops),
+    });
   return {
     label: "Saved to the review file",
     memoryOnly: false,
+    get pending() {
+      return pending;
+    },
     persist(ops) {
-      queue = queue.then(async () => {
-        const res = await fetch("api/review", {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json", ...(etag ? { "If-Match": etag } : {}) },
-          body: JSON.stringify(ops),
-        });
-        if (res.status === 409) throw new ConflictError("The review file changed on disk. Reload to get the latest version.");
+      pending++;
+      const attempt = async () => {
+        let res = await send(ops, etag);
+        let merged = false;
+        if (res.status === 409) {
+          // The file changed underneath (the watcher synced comments, or the AI
+          // added findings). Edits only touch threads and state and carry their
+          // own guards, so apply them to the newer file.
+          res = await send(ops, null);
+          merged = true;
+        }
+        if (res.status === 409) throw new ConflictError("This edit no longer applies to the latest file. Reload to see the current review.");
         if (!res.ok) {
           const body = (await res.json().catch(() => ({}))) as { error?: string; details?: string[] };
           throw new Error([body.error ?? `Save failed (${res.status})`, ...(body.details ?? [])].join("\n"));
         }
         etag = res.headers.get("ETag");
-        return (await res.json()) as ReviewFile;
+        const doc = (await res.json()) as ReviewFile;
+        return merged ? { merged: doc } : undefined;
+      };
+      const job = queue.then(async () => {
+        try {
+          return await attempt();
+        } finally {
+          pending--;
+        }
       });
-      return queue;
+      queue = job.catch(() => undefined);
+      return job;
+    },
+    async poll() {
+      if (pending > 0) return null;
+      const res = await fetch(url, { headers: { Accept: "application/json", ...(etag ? { "If-None-Match": etag } : {}) } });
+      if (res.status === 304 || !res.ok || pending > 0) return null;
+      etag = res.headers.get("ETag");
+      return (await res.json()) as ReviewFile;
     },
   };
 }

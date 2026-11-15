@@ -14,12 +14,10 @@
   "dependencies": {
     "@reviewexplainer/format": "0.1.0",
     "@reviewexplainer/core": "0.1.0",
-    "typebox": "1.3.27"
-  },
-  "peerDependencies": {
-    "@earendil-works/pi-coding-agent": ">=1.5.0"
+    "typebox": "1.3.27",
+    "@earendil-works/pi-coding-agent": "1.5.2"
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "1.5.2"
+    "@earendil-works/pi-ai": "1.5.2"
   }
 }

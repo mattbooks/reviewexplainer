@@ -13,8 +13,9 @@ import type { ReviewFile } from "@reviewexplainer/format";
 import { reviewPrompt } from "./prompt.ts";
 import { ALL_TOOLS, type ReviewSession } from "./tools.ts";
 
-export { reviewPrompt } from "./prompt.ts";
+export { reviewPrompt, rereviewPrompt } from "./prompt.ts";
 export * from "./tools.ts";
+export { runAi, type AiOptions, type AiResult } from "./agent.ts";
 
 export interface ReviewExtensionOptions {
   /** Review file to work on. Otherwise from --review, $GREVIEW_FILE, or `/review`. */
@@ -48,8 +49,8 @@ export function parseReviewArgs(args: string): ReviewCommandArgs {
 export function createReviewExtension(opts: ReviewExtensionOptions = {}) {
   return function reviewExtension(pi: ExtensionAPI): void {
     let file = opts.file;
-    let current: ReviewFile | undefined;
     let modelInfo: { model: string; provider: string } | undefined;
+    let cwd = process.cwd();
 
     const currentFile = (): string => {
       const flag = pi.getFlag("review");
@@ -59,18 +60,16 @@ export function createReviewExtension(opts: ReviewExtensionOptions = {}) {
       return file;
     };
 
+    // Always read from disk: the viewer and `greview watch` write the same file
+    // while an agent works, and a cached copy would overwrite their edits.
     const session: ReviewSession = {
-      get() {
-        const path = currentFile();
-        if (!current) current = readReview(path);
-        return current;
-      },
+      get: () => readReview(currentFile()),
       save(next) {
         writeReview(currentFile(), next);
-        current = next;
         opts.onSave?.(next);
       },
       ai: () => modelInfo,
+      cwd: () => cwd,
     };
 
     pi.registerFlag("review", { type: "string", description: "Review file for the review_* tools" });
@@ -84,7 +83,8 @@ export function createReviewExtension(opts: ReviewExtensionOptions = {}) {
         parameters: tool.parameters,
         async execute(_id, params, _signal, _onUpdate, ctx) {
           modelInfo = ctx.model ? { model: ctx.model.id, provider: String(ctx.model.provider) } : undefined;
-          return (tool.run as (s: ReviewSession, p: unknown) => ReturnType<typeof tool.run>)(session, params);
+          cwd = ctx.cwd;
+          return await (tool.run as (s: ReviewSession, p: unknown) => ReturnType<typeof tool.run>)(session, params);
         },
       });
     }
@@ -97,7 +97,6 @@ export function createReviewExtension(opts: ReviewExtensionOptions = {}) {
           const path = resolve(ctx.cwd, parsed.file);
           if (!existsSync(path)) throw new Error(`${path} does not exist`);
           file = path;
-          current = readReview(path);
         } else {
           const init: Parameters<typeof initReview>[0] = { cwd: ctx.cwd };
           if (parsed.range) init.range = parsed.range;
@@ -111,10 +110,9 @@ export function createReviewExtension(opts: ReviewExtensionOptions = {}) {
           const path = reviewPath(loadConfig(root), key, root);
           writeReview(path, review);
           file = path;
-          current = review;
         }
         if (ctx.hasUI) ctx.ui.notify(`Review file: ${file}`, "info");
-        pi.sendUserMessage(reviewPrompt(current, { findings: parsed.findings }));
+        pi.sendUserMessage(reviewPrompt(readReview(file), { findings: parsed.findings }));
       },
     });
   };
