@@ -58,7 +58,13 @@ export function resolveImport(from: string, spec: string, changed: Set<string>):
       for (const ext of JS_EXTS) candidates.push(b + ext, `${b}/index${ext}`);
     }
   } else {
-    return undefined;
+    // A bare specifier may name a workspace package in this change, e.g.
+    // "@acme/format" -> packages/format/src/index.ts.
+    const parts = spec.split("/");
+    const name = spec.startsWith("@") ? parts[1] : parts[0];
+    if (!name) return undefined;
+    const entry = new RegExp(`(^|/)${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/(src/)?index\\.(m|c)?[jt]sx?$`);
+    return [...changed].find((c) => c !== from && entry.test(c));
   }
   return candidates.find((c) => c !== from && changed.has(c));
 }
@@ -106,20 +112,39 @@ function lineStats(file: FileEntry, model: ReturnType<typeof parsePatch>) {
 
 const MAX_FILES_PER_STEP = 12;
 
-function splitLarge(bucket: Bucket): Bucket[] {
+function groupKey(path: string): string {
+  const parts = path.split("/");
+  return parts.length > 2 ? parts.slice(0, 2).join("/") : parts.length > 1 ? parts[0]! : ".";
+}
+
+/**
+ * Split a large step by directory. Groups are ordered by the imports between
+ * them (a group that others depend on comes first), then by first appearance.
+ */
+function splitLarge(bucket: Bucket, deps: Map<string, Set<string>>): Bucket[] {
   if (bucket.paths.length <= MAX_FILES_PER_STEP) return [bucket];
   const groups = new Map<string, string[]>();
   for (const p of bucket.paths) {
-    const parts = p.split("/");
-    const key = parts.length > 2 ? parts.slice(0, 2).join("/") : parts.length > 1 ? parts[0]! : ".";
+    const key = groupKey(p);
     groups.set(key, [...(groups.get(key) ?? []), p]);
   }
   if (groups.size <= 1) return [bucket];
-  return [...groups.entries()].map(([key, paths]) => ({
+  const groupDeps = new Map<string, Set<string>>();
+  for (const [key, paths] of groups) {
+    const set = new Set<string>();
+    for (const p of paths) {
+      for (const d of deps.get(p) ?? []) {
+        const other = groupKey(d);
+        if (other !== key && groups.has(other)) set.add(other);
+      }
+    }
+    groupDeps.set(key, set);
+  }
+  return dependencyOrder([...groups.keys()], groupDeps).map((key) => ({
     ...bucket,
     id: `${bucket.id}-${key.replace(/[^a-z0-9]+/gi, "-").toLowerCase()}`,
     title: `${bucket.title} (${key})`,
-    paths,
+    paths: groups.get(key)!,
   }));
 }
 
@@ -223,7 +248,7 @@ export async function heuristicGuide(review: ReviewFile, opts: HeuristicOptions 
 
   const steps: Step[] = buckets
     .filter((b) => b.paths.length > 0)
-    .flatMap(splitLarge)
+    .flatMap((b) => (b.id === "core" || b.id === "callers" ? splitLarge(b, deps) : [b]))
     .map((b) => ({
       id: b.id,
       title: b.title,

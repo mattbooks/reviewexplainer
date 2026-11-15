@@ -72,6 +72,9 @@ describe("roles and imports", () => {
     expect(resolveImport("src/b.ts", "react", changed)).toBeUndefined();
     expect(resolveImport("pkg/other.py", ".mod", changed)).toBe("pkg/mod.py");
     expect(resolveImport("app.py", "pkg.sub", changed)).toBe("pkg/sub/__init__.py");
+    const workspace = new Set(["packages/format/src/index.ts", "packages/core/src/a.ts"]);
+    expect(resolveImport("packages/core/src/a.ts", "@acme/format", workspace)).toBe("packages/format/src/index.ts");
+    expect(resolveImport("packages/core/src/a.ts", "@acme/other", workspace)).toBeUndefined();
   });
 
   it("parses ranges and remotes", () => {

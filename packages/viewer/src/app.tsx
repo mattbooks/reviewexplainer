@@ -153,10 +153,15 @@ function Reviewer({ loaded }: { loaded: Loaded }) {
     storeReviewerName(name);
   };
 
-  const goTo = useCallback((id: string | undefined, behavior: "smooth-auto" | "instant" = "smooth-auto") => {
+  const goTo = useCallback((id: string | undefined) => {
     if (!id) return;
     setCursor(id);
-    handle.current?.scrollTo({ type: "item", id, align: "start", behavior });
+    // Items are measured as they render (narration and threads change their
+    // height), so jump, then re-align once the target has been laid out.
+    const align = () => handle.current?.scrollTo({ type: "item", id, align: "start", behavior: "instant" });
+    align();
+    requestAnimationFrame(() => requestAnimationFrame(align));
+    window.setTimeout(align, 180);
   }, []);
 
   const toggleViewed = useCallback(
