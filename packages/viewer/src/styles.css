@@ -874,6 +874,11 @@ button.quiet:hover {
   padding: 8px 16px;
 }
 
+.welcome-example {
+  color: var(--muted);
+  margin: -8px 0 24px;
+}
+
 .welcome-url label {
   display: block;
   color: var(--muted);

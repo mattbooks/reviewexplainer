@@ -95,6 +95,8 @@ It runs in two modes from the same build:
 - **Hosted**: deploy `packages/viewer/dist` to any static host. Open a file by drag-and-drop, the file picker, or `?src=<url>` (a gist, a raw GitHub file or a CI artifact URL that allows CORS). Nothing is uploaded. Save with Download, or in place where the browser supports the File System Access API.
 - **Bundled**: put a `review.json` next to `index.html` in a static deployment and the viewer opens it automatically, which makes a self-contained page to share or attach to CI.
 
+**GitHub Pages.** `.github/workflows/pages.yml` deploys the viewer and the example review on every push to `main`. Turn it on under Settings → Pages → Source: GitHub Actions. A Pages site is public even when the repository is private (and a private repository needs a paid plan for Pages), so the workflow never publishes real reviews: open those from the site with "Open a review file", where they stay in your browser.
+
 On phone-sized screens the steps sit above the code, long lines wrap, and the view stays unified.
 
 ## The file format

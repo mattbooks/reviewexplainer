@@ -283,6 +283,13 @@ export function Welcome(props: {
   onUrl: (url: string) => void;
 }) {
   const [url, setUrl] = useState("");
+  const [hasExample, setHasExample] = useState(false);
+  useEffect(() => {
+    // A deployment can ship example.review.json next to the app to show what a review looks like.
+    fetch("example.review.json", { method: "HEAD" })
+      .then((r) => setHasExample(r.ok && (r.headers.get("content-type") ?? "").includes("json")))
+      .catch(() => setHasExample(false));
+  }, []);
   const [over, setOver] = useState(false);
   const input = useRef<HTMLInputElement>(null);
   const pick = async () => {
@@ -328,6 +335,14 @@ export function Welcome(props: {
           </button>
           <span>or drop it anywhere on this page</span>
         </div>
+        {hasExample ? (
+          <p className="welcome-example">
+            <button type="button" onClick={() => props.onUrl(new URL("example.review.json", location.href).href)}>
+              Try the example
+            </button>{" "}
+            A small change with an AI-written guide, findings and a GitHub thread.
+          </p>
+        ) : null}
         <input
           ref={input}
           type="file"
