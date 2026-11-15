@@ -34,13 +34,13 @@ Try the viewer on the bundled example: `greview serve examples/session-expiry.re
 | Command | What it does |
 | --- | --- |
 | `greview init [base..head] [--pr N] [--with-blobs] [--out FILE] [--ai]` | Collects the diff (merge base to head, like a PR) and writes a review file with a rule-based reading order. Defaults to origin's default branch..HEAD. `--with-blobs` embeds full file contents. `--ai` runs `greview ai` straight after. |
-| `greview ai [FILE] [--model provider/id] [--no-findings]` | Runs a headless pi session that reads the change and writes the reading order, overview, notes and findings through the review tools. Uses pi's default model unless `--model` is given. |
+| `greview ai [FILE] [--model provider/id] [--no-findings] [--sandbox MODE]` | Runs a headless pi session in a throwaway checkout of the head commit. The agent reads the change, runs tests to check what it suspects, and writes the reading order, overview, notes and findings through the review tools. Uses pi's default model unless `--model` is given. See [Sandboxing AI reviews](#sandboxing-ai-reviews). |
 | `greview sync github [FILE]` | Pulls PR review comments, replies and review summaries into threads. Comments GitHub marks outdated are re-placed by content when possible. |
 | `greview push github [FILE] [--no-open]` | Posts your open local threads as a **pending** GitHub review and opens the PR's Files tab, where you submit it. |
 | `greview refresh [FILE] [--head REF]` | Re-diffs against the latest head. Keeps steps for unchanged hunks, collects new hunks in "Remaining changes", re-anchors threads by fingerprint and marks the rest outdated. |
 | `greview serve [FILE] [--port N] [--no-open]` | Serves the viewer on localhost; comments and viewed state save straight back to the file. |
 | `greview validate FILE...` | Checks files against the format rules. |
-| `greview watch [--once] [--serve]`, `greview inbox` | Keeps reviews for PRs matching GitHub search filters, in worktrees (see [Watching GitHub](#watching-github)). |
+| `greview watch [--once] [--serve]`, `greview inbox` | Keeps reviews for PRs matching GitHub search filters, each in its own checkout (see [Watching GitHub](#watching-github)). |
 | `greview path [FILE]`, `greview schema` | Prints the file greview would use, or the JSON Schema. |
 
 `FILE` defaults to the newest review in the storage folder that matches the current checkout.
@@ -85,6 +85,50 @@ Load the extension with `pi -e /path/to/reviewexplainer/packages/pi-extension/sr
 
 Every tool validates against the patch and saves the file, so a bad anchor or a missed hunk comes back to the model as an error it can fix.
 
+Once `/review` starts, the extension's `bash` runs commands in the sandbox (below), with your repository as the working directory and its git config and hooks write-protected. Before `/review`, bash behaves normally. pi's `edit` and `write` tools are not sandboxed in an interactive session, so for code you don't trust, use `greview ai`.
+
+## Sandboxing AI reviews
+
+Every AI review (`greview ai`, `greview init --ai`, `greview watch` and `/review` in pi) lets the agent run the code it reviews: install dependencies, run the tests that cover the change, or write a quick script to confirm a bug. Commands run inside [agent-safehouse](https://agent-safehouse.dev), a macOS Seatbelt sandbox:
+
+```sh
+brew install eugene1g/safehouse/agent-safehouse
+```
+
+How a run is set up:
+
+- **A throwaway checkout of the head commit.** `greview ai` makes a `git clone --shared` in a temporary folder and deletes it afterwards; `greview watch` keeps one per PR and resets it before every run. Your own working tree is never touched, and tests run against exactly the commit under review.
+- **Git the agent can't tamper with.** The checkout's git directory lives outside the working tree and is mounted read-only, and greview always runs git with an explicit `--git-dir`, so the agent can't plant git config or hooks that greview (or you) would later run.
+- **Only `read` and `bash`, both inside the sandbox.** The agent can write the checkout and a scratch folder (`TMPDIR`, npm/pip/go caches), and read your toolchains. Each command starts with a clean environment: no API keys, no `GITHUB_TOKEN`, and anything it leaves running in the background is killed when it exits.
+- **The model loop stays outside.** pi runs in greview's process, so its credentials (`~/.pi/agent`) are never inside the sandbox. Extensions, skills and `AGENTS.md` from the repository under review are not loaded.
+
+The prompt tells the agent to verify findings by running something when it can, and to say in the comment what it ran and what happened.
+
+Choose the mode in `~/.config/greview/config.json`, or per run with `greview ai --sandbox MODE`:
+
+```json
+{
+  "sandbox": {
+    "mode": "auto",
+    "envPass": ["DATABASE_URL"],
+    "addDirsRo": ["~/.config/some-tool"],
+    "enable": ["docker"],
+    "commandTimeoutSeconds": 600
+  }
+}
+```
+
+| `mode` | Agent gets |
+| --- | --- |
+| `auto` (default) | `safehouse` when it is installed, otherwise `readonly` (greview prints which one it used) |
+| `safehouse` | A sandboxed shell. Fails instead of falling back if safehouse is missing. |
+| `readonly` | No shell: read, grep, find and ls, confined to the checkout (symlinks included) |
+| `none` | pi's normal tools, unsandboxed. Only for code you trust. |
+
+Other settings: `command` (path to safehouse, needed under launchd if it is not on `PATH`, or any wrapper taking the same arguments), `envPass` (variables to pass through from greview's environment), `env` (fixed variables), `addDirs` / `addDirsRo` (extra writable / readable folders), `enable` (safehouse features), `appendProfiles` (your own Seatbelt profiles, applied last), `commandTimeoutSeconds`. Sandbox settings are read only from your user config; a `.greview.json` in a repository cannot change them.
+
+**What it doesn't stop.** safehouse allows network access, so the agent can download dependencies, but a prompt-injected agent could also send out anything it can read: the PR's code and the repository's history (both read-only in the checkout) and whatever toolchain folders safehouse allows. Secrets in the environment, `~/.ssh` and pi's credentials are not readable. Running tests means running the PR author's code, with the same exposure. If that is too much for a repository, use `"mode": "readonly"`.
+
 ## The viewer
 
 - **Steps** (default) shows the guide as a route: each stop is a step, filled in as you mark its files viewed. **Files** shows a `@pierre/trees` tree sorted by first appearance in the guide, with open-thread counts.
@@ -104,7 +148,7 @@ On phone-sized screens the steps sit above the code, long lines wrap, and the vi
 
 ## Watching GitHub
 
-`greview watch` keeps a review for every open pull request matching your GitHub search filters, each in its own git worktree so the AI can read any file in the repository, not just the diff.
+`greview watch` keeps a review for every open pull request matching your GitHub search filters, each in its own checkout so the AI can read any file in the repository and run the tests, not just read the diff.
 
 Add filters to `~/.config/greview/config.json`:
 
@@ -128,18 +172,18 @@ Then run `greview watch --serve` and open the inbox it prints (or run `greview i
 
 | Event | What happens |
 | --- | --- |
-| A PR starts matching a filter | A bare clone per repository (shared object store) gets a worktree at the PR head; the review file is created, GitHub comments are synced, and an AI review is queued. |
+| A PR starts matching a filter | A bare clone per repository (shared object store) gets a checkout at the PR head; the review file is created, GitHub comments are synced, and an AI review is queued. |
 | Comments or other activity | GitHub threads are synced into the review file. |
-| New commits | After `settleSeconds` without further pushes, the worktree moves to the new head, the review is refreshed (new hunks, re-anchored threads), and the **same AI session** is resumed with a prompt saying the PR was updated and needs a re-review. The agent re-files the new hunks, resolves its own findings that were fixed, and reviews the new code. |
-| The PR stops matching but is still open | Paused; the worktree is kept. It resumes if it matches again. |
-| The PR is closed or merged | The worktree and its refs are removed at once; the review file and AI session are kept for `retainDays`, then deleted. |
+| New commits | After `settleSeconds` without further pushes, the checkout moves to the new head, the review is refreshed (new hunks, re-anchored threads), and the **same AI session** is resumed with a prompt saying the PR was updated and needs a re-review. The agent re-files the new hunks, resolves its own findings that were fixed, and reviews the new code. |
+| The PR stops matching but is still open | Paused; the checkout is kept. It resumes if it matches again. |
+| The PR is closed or merged | The checkout and its refs are removed at once; the review file and AI session are kept for `retainDays`, then deleted. |
 | A PR from a fork | Skipped. |
 
-Other commands: `greview watch --once` (one pass, then exit), `greview watch status`, `greview watch clean` (remove closed and paused reviews and orphaned worktrees now).
+Other commands: `greview watch --once` (one pass, then exit), `greview watch status`, `greview watch clean` (remove closed and paused reviews and orphaned checkouts now).
 
-Everything lives under `~/.cache/greview/watch/` (`repos/`, `worktrees/`, `sessions/`, `state/`); review files go to `~/.cache/greview/<owner>/<repo>/pr-<n>.review.json`. A restart picks up where it left off: interrupted AI runs are queued again and orphaned worktrees are removed. Failed runs are retried up to three times, ten minutes apart.
+Everything lives under `~/.cache/greview/watch/` (`repos/`, `worktrees/` for checkouts, `gitdirs/`, `scratch/`, `sessions/`, `state/`); review files go to `~/.cache/greview/<owner>/<repo>/pr-<n>.review.json`. A restart picks up where it left off: interrupted AI runs are queued again and orphaned checkouts are removed. Failed runs are retried up to three times, ten minutes apart.
 
-**What the agent can do.** Watched PRs contain code and comments written by other people, so the agent only gets read, grep, find, ls, `review_git_show` and the review tools: no shell, no network, and it never builds or runs the code. The worktree is reset before every run, and watch settings come only from your user config, never from a repository.
+**What the agent can do.** Watched PRs contain code and comments written by other people, so the agent runs in the sandbox described in [Sandboxing AI reviews](#sandboxing-ai-reviews): it can run the PR's tests inside safehouse, or only read files if safehouse isn't installed. `greview watch` prints which at startup, and with `"mode": "safehouse"` it refuses to start without it. The checkout is reset before every run, and watch and sandbox settings come only from your user config, never from a repository.
 
 **Running it at login (macOS).** Save as `~/Library/LaunchAgents/dev.greview.watch.plist`, adjust the paths, then `launchctl load ~/Library/LaunchAgents/dev.greview.watch.plist`:
 
@@ -165,7 +209,7 @@ Everything lives under `~/.cache/greview/watch/` (`repos/`, `worktrees/`, `sessi
 </plist>
 ```
 
-`gh` must be on that `PATH` (for the token) and logged in, and git must be able to fetch your private repositories (e.g. `gh auth setup-git`).
+`gh` and `safehouse` must be on that `PATH` (or set `sandbox.command`), `gh` logged in, and git must be able to fetch your private repositories (e.g. `gh auth setup-git`).
 
 ## The file format
 
@@ -199,8 +243,8 @@ npx tsx examples/make-example.ts   # regenerate the example review
 | --- | --- |
 | `packages/format` | Schema, types, patch parser, sub-patches, anchors, validator. No Node or DOM dependencies. |
 | `packages/core` | git and GitHub collection, rule-based ordering, sync, push, refresh, storage |
-| `packages/pi-extension` | `/review` command, review tools, and the headless agent runner (resumable sessions) |
-| `packages/watch` | `greview watch`: filters, worktrees, state, AI queue, cleanup |
+| `packages/pi-extension` | `/review` command, review tools, the sandbox, and the headless agent runner (resumable sessions) |
+| `packages/watch` | `greview watch`: filters, checkouts, state, AI queue, cleanup |
 | `packages/cli` | `greview`, the local server and the inbox |
 | `packages/viewer` | The web app |
 

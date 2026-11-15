@@ -30,7 +30,11 @@ export async function revParse(cwd: string, rev: string): Promise<string> {
   return (await git(cwd, "rev-parse", "--verify", `${rev}^{commit}`)).trim();
 }
 
+/** Top of the working tree, or the git directory itself for a bare repository. */
 export async function repoRoot(cwd: string): Promise<string> {
+  if ((await git(cwd, "rev-parse", "--is-bare-repository")).trim() === "true") {
+    return (await git(cwd, "rev-parse", "--absolute-git-dir")).trim();
+  }
   return (await git(cwd, "rev-parse", "--show-toplevel")).trim();
 }
 
@@ -89,17 +93,23 @@ export async function showFile(cwd: string, sha: string, path: string): Promise<
   }
 }
 
-/** Paths git attributes mark as linguist-generated or linguist-vendored. */
-export async function attributeFlags(cwd: string, paths: string[]): Promise<Map<string, Set<string>>> {
+/**
+ * Paths git attributes mark as linguist-generated or linguist-vendored. With
+ * `source`, attributes are read from that commit (works in bare repositories).
+ */
+export async function attributeFlags(cwd: string, paths: string[], source?: string): Promise<Map<string, Set<string>>> {
   const out = new Map<string, Set<string>>();
   if (paths.length === 0) return out;
-  try {
-    const text = await run(
+  const check = (withSource: boolean) =>
+    run(
       "git",
-      ["check-attr", "--stdin", "-z", "linguist-generated", "linguist-vendored", "linguist-documentation"],
+      ["check-attr", ...(withSource && source ? [`--source=${source}`] : []), "--stdin", "-z", "linguist-generated", "linguist-vendored", "linguist-documentation"],
       cwd,
       paths.join("\0") + "\0",
     );
+  try {
+    // --source needs git 2.40; older git reads the working tree's attributes.
+    const text = await check(true).catch(() => check(false));
     const parts = text.split("\0");
     for (let i = 0; i + 2 < parts.length; i += 3) {
       const [path, attr, value] = [parts[i]!, parts[i + 1]!, parts[i + 2]!];

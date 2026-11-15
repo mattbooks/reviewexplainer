@@ -6,3 +6,4 @@ export * from "./refresh.ts";
 export * from "./config.ts";
 export * from "./io.ts";
 export * from "./workflow.ts";
+export * from "./checkout.ts";

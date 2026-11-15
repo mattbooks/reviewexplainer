@@ -5,16 +5,19 @@
  * listing this package in pi's settings, or from the SDK through
  * `createReviewExtension({ file })` (that is what `greview ai` does).
  */
-import { existsSync } from "node:fs";
-import { resolve } from "node:path";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { initReview, loadConfig, readReview, reviewPath, writeReview } from "@reviewexplainer/core";
+import { createHash } from "node:crypto";
+import { existsSync, statSync } from "node:fs";
+import { join, resolve } from "node:path";
+import { createBashToolDefinition, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { cacheDir, git, initReview, loadConfig, readReview, reviewPath, writeReview } from "@reviewexplainer/core";
 import type { ReviewFile } from "@reviewexplainer/format";
 import { reviewPrompt } from "./prompt.ts";
 import { ALL_TOOLS, type ReviewSession } from "./tools.ts";
+import { loadSandboxSettings, protectGitDirProfile, resolveSandbox, sandboxTools, type SandboxPlan, type SandboxScope } from "./sandbox.ts";
 
 export { reviewPrompt, rereviewPrompt } from "./prompt.ts";
 export * from "./tools.ts";
+export * from "./sandbox.ts";
 export { runAi, type AiOptions, type AiResult } from "./agent.ts";
 
 export interface ReviewExtensionOptions {
@@ -22,6 +25,15 @@ export interface ReviewExtensionOptions {
   file?: string;
   /** Called after every successful save. */
   onSave?: (review: ReviewFile) => void;
+  /** Git runner for the review tools (checkouts pass one that ignores the agent-writable `.git`). */
+  git?: (...args: string[]) => Promise<string>;
+  /**
+   * In interactive pi, replace bash so that once /review starts, commands run
+   * in the configured sandbox (default true). `greview ai` sets its own tools.
+   */
+  sandboxBash?: boolean;
+  /** Sandbox to use instead of the user config (tests). */
+  sandboxPlan?: SandboxPlan;
 }
 
 export interface ReviewCommandArgs {
@@ -70,6 +82,7 @@ export function createReviewExtension(opts: ReviewExtensionOptions = {}) {
       },
       ai: () => modelInfo,
       cwd: () => cwd,
+      ...(opts.git ? { git: opts.git } : {}),
     };
 
     pi.registerFlag("review", { type: "string", description: "Review file for the review_* tools" });
@@ -87,6 +100,35 @@ export function createReviewExtension(opts: ReviewExtensionOptions = {}) {
           return await (tool.run as (s: ReviewSession, p: unknown) => ReturnType<typeof tool.run>)(session, params);
         },
       });
+    }
+
+    // Interactive pi: bash behaves normally until /review starts; from then on
+    // it runs in the sandbox (or is refused when only read-only is possible).
+    let reviewing = false;
+    let plan: SandboxPlan | undefined;
+    let planError: string | undefined;
+    if (opts.sandboxBash !== false) {
+      try {
+        plan = opts.sandboxPlan ?? resolveSandbox(loadSandboxSettings());
+      } catch (e) {
+        planError = (e as Error).message;
+      }
+      if (planError || plan?.kind !== "none") {
+        const base = createBashToolDefinition(process.cwd());
+        pi.registerTool({
+          ...base,
+          async execute(id, params, signal, onUpdate, ctx) {
+            if (!reviewing) return createBashToolDefinition(ctx.cwd).execute(id, params, signal, onUpdate, ctx);
+            if (planError) throw new Error(planError);
+            if (plan!.kind === "readonly") {
+              throw new Error(`bash is off during /review: ${plan!.note ?? "the sandbox is read-only"}. Use read, grep, find and ls.`);
+            }
+            const scope = await interactiveScope(ctx.cwd);
+            const sandboxed = sandboxTools(plan!, scope).find((t) => t.name === "bash")!;
+            return sandboxed.execute(id, params, signal, onUpdate, ctx);
+          },
+        });
+      }
     }
 
     pi.registerCommand("review", {
@@ -111,11 +153,40 @@ export function createReviewExtension(opts: ReviewExtensionOptions = {}) {
           writeReview(path, review);
           file = path;
         }
-        if (ctx.hasUI) ctx.ui.notify(`Review file: ${file}`, "info");
-        pi.sendUserMessage(reviewPrompt(readReview(file), { findings: parsed.findings }));
+        reviewing = opts.sandboxBash !== false;
+        const shell = !planError && plan?.kind !== "readonly";
+        if (ctx.hasUI) {
+          ctx.ui.notify(`Review file: ${file}`, "info");
+          if (reviewing) {
+            ctx.ui.notify(
+              planError ? `bash is off: ${planError}` : plan!.kind === "safehouse" ? "bash runs in safehouse for this review" : plan!.kind === "readonly" ? `bash is off for this review. ${plan!.note ?? ""}` : "bash is not sandboxed (sandbox.mode is none)",
+              plan?.kind === "safehouse" ? "info" : "warning",
+            );
+          }
+        }
+        pi.sendUserMessage(
+          reviewPrompt(readReview(file), { findings: parsed.findings, tools: shell ? "shell" : "readonly", sandboxed: plan?.kind === "safehouse" }),
+        );
       },
     });
   };
+}
+
+/**
+ * Sandbox scope for interactive pi: the user's own repository is the workdir,
+ * so its git config and hooks are protected by an extra Seatbelt rule.
+ */
+async function interactiveScope(cwd: string): Promise<SandboxScope> {
+  const scratch = join(cacheDir(), "sandbox", createHash("sha1").update(resolve(cwd)).digest("hex").slice(0, 12));
+  const scope: SandboxScope = { workdir: cwd, scratch, readOnlyDirs: [] };
+  try {
+    const gitDir = (await git(cwd, "rev-parse", "--absolute-git-dir")).trim();
+    const common = resolve(cwd, (await git(cwd, "rev-parse", "--git-common-dir")).trim());
+    scope.profile = [...new Set([gitDir, common])].filter((d) => statSync(d).isDirectory()).map(protectGitDirProfile).join("");
+  } catch {
+    // not a git repository: nothing to protect
+  }
+  return scope;
 }
 
 export default createReviewExtension();

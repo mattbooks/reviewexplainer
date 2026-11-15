@@ -18,6 +18,8 @@ export interface GreviewConfig {
   model?: string;
   /** Settings for `greview watch` (validated by the watch package). User config only. */
   watch?: unknown;
+  /** How AI reviews are sandboxed (validated by the pi extension). User config only. */
+  sandbox?: unknown;
 }
 
 const DEFAULTS: GreviewConfig = { storage: "cache" };
@@ -39,7 +41,9 @@ export function userConfigPath(): string {
 export function loadConfig(repoRoot: string | undefined): GreviewConfig {
   const user = readJson(userConfigPath());
   const repo = repoRoot ? readJson(join(repoRoot, ".greview.json")) : {};
-  const merged = { ...DEFAULTS, ...user, ...repo };
+  // A repository must not be able to turn off the sandbox or change watch settings.
+  const { sandbox: _s, watch: _w, ...repoSafe } = repo;
+  const merged = { ...DEFAULTS, ...user, ...repoSafe };
   if (!["cache", "repo", "path"].includes(merged.storage)) {
     throw new Error(`Unknown storage "${merged.storage}"; use cache, repo or path`);
   }

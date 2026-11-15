@@ -39,8 +39,9 @@ async function ensureCommit(cwd: string, sha: string, fetchSpec: string): Promis
   }
 }
 
-async function roles(cwd: string, paths: string[]): Promise<Record<string, ReviewFile["files"][number]["role"]>> {
-  const attrs = await attributeFlags(cwd, paths);
+async function roles(cwd: string, paths: string[], head: string): Promise<Record<string, ReviewFile["files"][number]["role"]>> {
+  // Attributes as of the head commit, not whatever the working tree has.
+  const attrs = await attributeFlags(cwd, paths, head);
   return Object.fromEntries(paths.map((p) => [p, roleForPath(p, attrs.get(p))]));
 }
 
@@ -128,7 +129,7 @@ export async function initReview(opts: InitOptions): Promise<InitResult> {
   }
 
   const draft = createReview({ subject, patch, tool: TOOL_NAME, version: TOOL_VERSION });
-  const fileRoles = await roles(root, draft.files.map((f) => f.path));
+  const fileRoles = await roles(root, draft.files.map((f) => f.path), subject.head.sha);
   let review: ReviewFile = { ...draft, files: draft.files.map((f) => ({ ...f, role: fileRoles[f.path] })) };
   review = await heuristicGuide(review, {
     contentAt: (path) => showFile(root, subject.head.sha, path),
@@ -185,7 +186,7 @@ export async function refreshFromGit(
     subject = { ...review.subject, base: { ...review.subject.base, sha: diff.baseSha }, head: { ...review.subject.head, sha: diff.headSha }, mergeBase: diff.mergeBase };
   }
   const draft = createReview({ subject, patch, tool: TOOL_NAME, version: TOOL_VERSION });
-  const fileRoles = await roles(root, draft.files.map((f) => f.path));
+  const fileRoles = await roles(root, draft.files.map((f) => f.path), subject.head.sha);
   const headSha = subject.head.sha;
   const baseSha = subject.mergeBase ?? subject.base.sha;
   const { review: next, report } = await refreshReview(review, {

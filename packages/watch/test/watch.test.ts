@@ -17,6 +17,8 @@ import {
 } from "@reviewexplainer/core";
 import { validateReview } from "@reviewexplainer/format";
 import { commit, makeRepo, write } from "../../core/test/helpers.ts";
+import { resolveSandbox, type SandboxPlan } from "@reviewexplainer/pi-extension";
+import { fakeSafehouse } from "../../pi-extension/test/fake-safehouse.ts";
 import { parseWatchConfig, Watcher, type WatchConfig } from "../src/index.ts";
 
 interface FakePr {
@@ -116,7 +118,7 @@ function lastUserText(context: any): string {
   return JSON.stringify(users.at(-1)?.content ?? "");
 }
 
-async function setup(opts: { settleSeconds?: number } = {}) {
+async function setup(opts: { settleSeconds?: number; sandboxPlan?: SandboxPlan } = {}) {
   const work = makeRepo();
   cleanups.push(work.cleanup);
   const remote = join(home, "remote.git");
@@ -151,6 +153,7 @@ async function setup(opts: { settleSeconds?: number } = {}) {
     now: () => clock,
     remoteUrl: () => remote,
     ai: { sessionOverrides: { modelRuntime: runtime, model: faux.getModel() } },
+    ...(opts.sandboxPlan ? { sandboxPlan: opts.sandboxPlan } : {}),
   });
 
   const push = (files: Record<string, string>) => {
@@ -166,6 +169,48 @@ async function setup(opts: { settleSeconds?: number } = {}) {
   };
   return { work, remote, github, faux, watcher, config, logs, head, push, advance };
 }
+
+describe("Watcher with a sandbox", () => {
+  it("lets the agent run commands in the PR checkout and resets it before the re-review", async () => {
+    const fake = fakeSafehouse(home);
+    const { watcher, faux, head, push, advance } = await setup({ sandboxPlan: resolveSandbox({ mode: "safehouse", command: fake.command }) });
+    const outputs: string[] = [];
+    const resultOf = (context: any) => {
+      const m = [...context.messages].reverse().find((x: any) => x.role === "toolResult");
+      outputs.push(m ? m.content.map((c: any) => c.text ?? "").join("") : "");
+    };
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("bash", { command: "git rev-parse HEAD; echo junk > junk.txt; ls" })], { stopReason: "toolUse" }),
+      (context: any) => {
+        resultOf(context);
+        return fauxAssistantMessage([fauxText("Ran it.")]);
+      },
+    ]);
+    await watcher.tick();
+    await watcher.drain();
+    expect(outputs[0]).toContain(head);
+    expect(outputs[0]).toContain("junk.txt");
+    const rec = watcher.state.get("acme/app#1")!;
+    expect(rec.status).toBe("ready");
+    const call = fake.calls().at(-1)!;
+    expect(call.args).toContain(`--workdir=${rec.worktree}`);
+    expect(call.args.find((a: string) => a.startsWith("--add-dirs-ro="))).toContain(watcher.worktrees.gitDirsDir);
+
+    const newHead = push({ "src/api.ts": "export const api = 2;\n" });
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("bash", { command: "git rev-parse HEAD; ls" })], { stopReason: "toolUse" }),
+      (context: any) => {
+        resultOf(context);
+        return fauxAssistantMessage([fauxText("Re-reviewed.")]);
+      },
+    ]);
+    advance(60);
+    await watcher.tick();
+    await watcher.drain();
+    expect(outputs[1]).toContain(newHead);
+    expect(outputs[1]).not.toContain("junk.txt");
+  });
+});
 
 describe("parseWatchConfig", () => {
   it("fills defaults and rejects bad settings", () => {
@@ -226,7 +271,9 @@ describe("Watcher", () => {
     expect(existsSync(rec.sessionFile!)).toBe(true);
     expect(git(rec.worktree!, "rev-parse", "HEAD")).toBe(head);
     expect(readFileSync(join(rec.worktree!, "src/api.ts"), "utf8")).toContain("email");
-    expect(prompts[0]).toContain("checkout of the PR head");
+    expect(prompts[0]).toContain("checkout of the head commit");
+    // The checkout's git directory lives outside the working tree the agent can write.
+    expect(readFileSync(join(rec.worktree!, ".git"), "utf8")).toContain(watcher.worktrees.gitDirsDir);
 
     const review = readReview(rec.reviewFile!);
     expect(validateReview(review).errors).toEqual([]);
@@ -317,7 +364,7 @@ describe("Watcher", () => {
     expect(existsSync(rec.worktree!)).toBe(false);
     expect(watcher.state.get("acme/app#1")).toMatchObject({ status: "closed", merged: true });
     expect(existsSync(rec.reviewFile!)).toBe(true);
-    expect(git(watcher.worktrees.mirror("acme", "app"), "worktree", "list")).not.toContain("pr-1");
+    expect(existsSync(watcher.worktrees.paths("acme", "app", 1).gitDir)).toBe(false);
 
     advance(8 * 24 * 3600);
     s = await watcher.tick();
