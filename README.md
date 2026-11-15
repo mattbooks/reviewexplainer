@@ -93,6 +93,9 @@ It runs in two modes from the same build:
 
 - **Local** (`greview serve`): edits are sent as JSON Patch on `/threads` and `/state`, validated, and written atomically. A changed file on disk is detected with ETags.
 - **Hosted**: deploy `packages/viewer/dist` to any static host. Open a file by drag-and-drop, the file picker, or `?src=<url>` (a gist, a raw GitHub file or a CI artifact URL that allows CORS). Nothing is uploaded. Save with Download, or in place where the browser supports the File System Access API.
+- **Bundled**: put a `review.json` next to `index.html` in a static deployment and the viewer opens it automatically, which makes a self-contained page to share or attach to CI.
+
+On phone-sized screens the steps sit above the code, long lines wrap, and the view stays unified.
 
 ## The file format
 

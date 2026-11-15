@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { CodeView, type CodeViewHandle, type DiffLineAnnotation, type SelectedLineRange } from "@pierre/diffs/react";
 import { fromPierreSide, makeLinesAnchor, type Anchor, type ReviewFile, type Source, type Step } from "@reviewexplainer/format";
 import { Composer, Files, NoteCard, Route, StepIntro, ThreadCard, Welcome } from "./components.tsx";
-import { fromFile, fromServer, fromUrl, type Loaded } from "./load.ts";
+import { fromBundled, fromFile, fromServer, fromUrl, type Loaded } from "./load.ts";
 import { Markdown } from "./markdown.tsx";
 import {
   apply,
@@ -50,7 +50,7 @@ export function App() {
     }
     void (async () => {
       try {
-        const local = await fromServer();
+        const local = (await fromServer()) ?? (await fromBundled());
         if (local) {
           setLoaded(local);
           setPhase("ready");
@@ -95,6 +95,7 @@ function Reviewer({ loaded }: { loaded: Loaded }) {
   const [drawer, setDrawer] = useState(false);
   const [help, setHelp] = useState(false);
   const [split, setSplit] = useState(false);
+  const narrow = useNarrow();
   const [selection, setSelection] = useState<{ id: string; range: SelectedLineRange } | null>(null);
   const [reviewer, setReviewer] = useState<string | null>(loaded.reviewer ?? storedReviewerName());
   const handle = useRef<CodeViewHandle<SpotMeta, undefined>>(null);
@@ -473,7 +474,7 @@ function Reviewer({ loaded }: { loaded: Loaded }) {
             Resolved
           </label>
         </fieldset>
-        <button type="button" className="quiet" onClick={() => setSplit((s) => !s)} aria-pressed={split}>
+        <button type="button" className="quiet split-toggle" onClick={() => setSplit((s) => !s)} aria-pressed={split}>
           {split ? "Unified" : "Split"}
         </button>
         {outdated.length ? (
@@ -534,10 +535,10 @@ function Reviewer({ loaded }: { loaded: Loaded }) {
           ref={handle}
           items={decorated.items}
           options={{
-            diffStyle: split ? "split" : "unified",
+            diffStyle: split && !narrow ? "split" : "unified",
             stickyHeaders: true,
             themeType: "system",
-            overflow: "scroll",
+            overflow: narrow ? "wrap" : "scroll",
             enableGutterUtility: true,
             enableLineSelection: true,
             lineDiffType: "word",
@@ -602,6 +603,20 @@ function Reviewer({ loaded }: { loaded: Loaded }) {
       ) : null}
     </div>
   );
+}
+
+/** True on phone-sized screens: wrap long lines and keep the unified view. */
+function useNarrow(): boolean {
+  const query = "(max-width: 860px)";
+  const [narrow, setNarrow] = useState(() => window.matchMedia?.(query).matches ?? false);
+  useEffect(() => {
+    const mq = window.matchMedia?.(query);
+    if (!mq) return;
+    const on = () => setNarrow(mq.matches);
+    mq.addEventListener("change", on);
+    return () => mq.removeEventListener("change", on);
+  }, []);
+  return narrow;
 }
 
 function SaveStatus(props: {

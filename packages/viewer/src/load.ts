@@ -52,6 +52,25 @@ export async function fromServer(): Promise<Loaded | null> {
   return { review, backend: serverBackend(res.headers.get("ETag")), name, reviewer, warnings };
 }
 
+/**
+ * A static deployment can ship a review next to the viewer as review.json
+ * (e.g. a CI artifact or a shareable page). Anything else at that path, such
+ * as an HTML fallback page, is ignored.
+ */
+export async function fromBundled(): Promise<Loaded | null> {
+  let text: string;
+  try {
+    const res = await fetch("review.json", { headers: { Accept: "application/json" } });
+    if (!res.ok) return null;
+    text = await res.text();
+  } catch {
+    return null;
+  }
+  if (!text.trimStart().startsWith("{")) return null;
+  const { review, warnings } = parseReview(text);
+  return { review, backend: memoryBackend(), name: "review.json", reviewer: null, warnings };
+}
+
 export async function fromUrl(url: string): Promise<Loaded> {
   const res = await fetch(url);
   if (!res.ok) throw new Error(`Could not load ${url}: ${res.status} ${res.statusText}`);
