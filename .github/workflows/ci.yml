@@ -1,0 +1,26 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      - name: Example review is valid
+        run: node packages/cli/bin/greview.mjs validate examples/session-expiry.review.json
+      - name: Schema is up to date
+        run: |
+          node packages/cli/bin/greview.mjs schema > /tmp/schema.json
+          diff -u schema/review.schema.json /tmp/schema.json

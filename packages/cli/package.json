@@ -1,0 +1,22 @@
+{
+  "name": "@reviewexplainer/cli",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "greview: create, enrich, sync and serve guided review files",
+  "bin": {
+    "greview": "./bin/greview.mjs"
+  },
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "1.5.2",
+    "@reviewexplainer/core": "0.1.0",
+    "@reviewexplainer/format": "0.1.0",
+    "@reviewexplainer/pi-extension": "0.1.0",
+    "tsx": "^4.20.6"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "1.5.2"
+  }
+}

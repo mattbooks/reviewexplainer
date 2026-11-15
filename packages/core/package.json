@@ -1,0 +1,12 @@
+{
+  "name": "@reviewexplainer/core",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Node-side collection, ordering, GitHub sync and re-anchoring for review files",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@reviewexplainer/format": "0.1.0"
+  }
+}

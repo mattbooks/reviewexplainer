@@ -1,0 +1,439 @@
+{
+  "$schema": "https://raw.githubusercontent.com/mattbooks/reviewexplainer/main/schema/review.schema.json",
+  "version": 1,
+  "generators": [
+    {
+      "tool": "greview",
+      "version": "0.1.0",
+      "at": "2026-11-15T16:04:07.590Z"
+    }
+  ],
+  "subject": {
+    "base": {
+      "ref": "main",
+      "sha": "090e138b9ff665848aa7d3cb9de6c428edaf4f0c"
+    },
+    "head": {
+      "ref": "session-expiry",
+      "sha": "3f994023bcb408d3474122dad66934af4e141a8c"
+    },
+    "mergeBase": "090e138b9ff665848aa7d3cb9de6c428edaf4f0c",
+    "repo": {
+      "owner": "acme",
+      "name": "app"
+    },
+    "pr": {
+      "number": 482,
+      "url": "https://github.com/acme/app/pull/482",
+      "title": "Expire sessions after a week of inactivity",
+      "author": "dana"
+    }
+  },
+  "patch": "diff --git a/docs/sessions.md b/docs/sessions.md\nindex d4e7805..b0cc54e 100644\n--- a/docs/sessions.md\n+++ b/docs/sessions.md\n@@ -1,3 +1,4 @@\n # Sessions\n \n Sessions are stored server side and identified by the `sid` cookie.\n+They expire after seven days without activity; each authenticated request extends them.\ndiff --git a/package-lock.json b/package-lock.json\nindex 9832141..aea9b98 100644\n--- a/package-lock.json\n+++ b/package-lock.json\n@@ -1,4 +1,5 @@\n {\n   \"name\": \"app\",\n-  \"lockfileVersion\": 3\n+  \"lockfileVersion\": 3,\n+  \"packages\": {}\n }\ndiff --git a/src/http/auth-middleware.ts b/src/http/auth-middleware.ts\nindex bdb91e7..524d897 100644\n--- a/src/http/auth-middleware.ts\n+++ b/src/http/auth-middleware.ts\n@@ -5,10 +5,11 @@ export function requireSession(sessions: SessionManager) {\n     const id = req.cookies?.sid;\n     const session = id ? await sessions.resolve(id) : undefined;\n     if (!session) {\n+      res.clearCookie(\"sid\");\n       res.status(401).end();\n       return;\n     }\n-    req.session = session;\n+    req.session = await sessions.touch(session);\n     next();\n   };\n }\ndiff --git a/src/http/login.ts b/src/http/login.ts\nindex 32b6a09..cc9d98a 100644\n--- a/src/http/login.ts\n+++ b/src/http/login.ts\n@@ -2,6 +2,6 @@ import type { SessionManager } from \"../session/manager\";\n \n export async function login(sessions: SessionManager, userId: string, res: any) {\n   const session = await sessions.create(userId);\n-  res.cookie(\"sid\", session.id, { httpOnly: true, sameSite: \"lax\" });\n+  res.cookie(\"sid\", session.id, { httpOnly: true, sameSite: \"lax\", expires: session.expiresAt });\n   return session;\n }\ndiff --git a/src/session/manager.ts b/src/session/manager.ts\nindex 601d755..ae5083e 100644\n--- a/src/session/manager.ts\n+++ b/src/session/manager.ts\n@@ -1,17 +1,35 @@\n import { randomUUID } from \"node:crypto\";\n-import type { Session, SessionStore } from \"./types\";\n+import { DEFAULT_TTL_MS, type Session, type SessionStore } from \"./types\";\n \n export class SessionManager {\n-  constructor(private store: SessionStore) {}\n+  constructor(\n+    private store: SessionStore,\n+    private ttlMs = DEFAULT_TTL_MS,\n+    private now = () => new Date(),\n+  ) {}\n \n   async create(userId: string): Promise<Session> {\n-    const session = { id: randomUUID(), userId, createdAt: new Date() };\n+    const createdAt = this.now();\n+    const session = { id: randomUUID(), userId, createdAt, expiresAt: new Date(createdAt.getTime() + this.ttlMs) };\n     await this.store.put(session);\n     return session;\n   }\n \n   async resolve(id: string): Promise<Session | undefined> {\n-    return this.store.get(id);\n+    const session = await this.store.get(id);\n+    if (!session) return undefined;\n+    if (session.expiresAt < this.now()) {\n+      this.store.delete(id);\n+      return undefined;\n+    }\n+    return session;\n+  }\n+\n+  /** Push the expiry forward; called on every authenticated request. */\n+  async touch(session: Session): Promise<Session> {\n+    const next = { ...session, expiresAt: new Date(this.now().getTime() + this.ttlMs) };\n+    await this.store.put(next);\n+    return next;\n   }\n \n   async destroy(id: string): Promise<void> {\ndiff --git a/src/session/types.ts b/src/session/types.ts\nindex c8aedf8..ef1efb5 100644\n--- a/src/session/types.ts\n+++ b/src/session/types.ts\n@@ -2,6 +2,8 @@ export interface Session {\n   id: string;\n   userId: string;\n   createdAt: Date;\n+  /** When the session stops being valid. */\n+  expiresAt: Date;\n }\n \n export interface SessionStore {\n@@ -9,3 +11,5 @@ export interface SessionStore {\n   put(session: Session): Promise<void>;\n   delete(id: string): Promise<void>;\n }\n+\n+export const DEFAULT_TTL_MS = 1000 * 60 * 60 * 24 * 7;\ndiff --git a/test/session.test.ts b/test/session.test.ts\nindex 2092d4f..ebb9f41 100644\n--- a/test/session.test.ts\n+++ b/test/session.test.ts\n@@ -6,3 +6,11 @@ test(\"creates and resolves a session\", async () => {\n   const s = await m.create(\"u1\");\n   expect(await m.resolve(s.id)).toEqual(s);\n });\n+\n+test(\"expired sessions do not resolve\", async () => {\n+  let now = new Date(\"2026-01-01T00:00:00Z\");\n+  const m = new SessionManager(memoryStore(), 1000, () => now);\n+  const s = await m.create(\"u1\");\n+  now = new Date(\"2026-01-01T00:00:02Z\");\n+  expect(await m.resolve(s.id)).toBeUndefined();\n+});\n",
+  "files": [
+    {
+      "path": "docs/sessions.md",
+      "status": "modified",
+      "hunks": [
+        {
+          "id": "e9d0aae9ef",
+          "header": "@@ -1,3 +1,4 @@",
+          "oldStart": 1,
+          "oldCount": 3,
+          "newStart": 1,
+          "newCount": 4,
+          "rows": 4
+        }
+      ],
+      "role": "docs"
+    },
+    {
+      "path": "package-lock.json",
+      "status": "modified",
+      "hunks": [
+        {
+          "id": "833a9a38a1",
+          "header": "@@ -1,4 +1,5 @@",
+          "oldStart": 1,
+          "oldCount": 4,
+          "newStart": 1,
+          "newCount": 5,
+          "rows": 6
+        }
+      ],
+      "role": "lockfile"
+    },
+    {
+      "path": "src/http/auth-middleware.ts",
+      "status": "modified",
+      "hunks": [
+        {
+          "id": "355d5cb8a1",
+          "header": "@@ -5,10 +5,11 @@ export function requireSession(sessions: SessionManager) {",
+          "oldStart": 5,
+          "oldCount": 10,
+          "newStart": 5,
+          "newCount": 11,
+          "rows": 12
+        }
+      ],
+      "role": "source"
+    },
+    {
+      "path": "src/http/login.ts",
+      "status": "modified",
+      "hunks": [
+        {
+          "id": "ae8e7eb32f",
+          "header": "@@ -2,6 +2,6 @@ import type { SessionManager } from \"../session/manager\";",
+          "oldStart": 2,
+          "oldCount": 6,
+          "newStart": 2,
+          "newCount": 6,
+          "rows": 7
+        }
+      ],
+      "role": "source"
+    },
+    {
+      "path": "src/session/manager.ts",
+      "status": "modified",
+      "hunks": [
+        {
+          "id": "bdf36111f7",
+          "header": "@@ -1,17 +1,35 @@",
+          "oldStart": 1,
+          "oldCount": 17,
+          "newStart": 1,
+          "newCount": 35,
+          "rows": 39
+        }
+      ],
+      "role": "source"
+    },
+    {
+      "path": "src/session/types.ts",
+      "status": "modified",
+      "hunks": [
+        {
+          "id": "5f797f7d68",
+          "header": "@@ -2,6 +2,8 @@ export interface Session {",
+          "oldStart": 2,
+          "oldCount": 6,
+          "newStart": 2,
+          "newCount": 8,
+          "rows": 8
+        },
+        {
+          "id": "f4f3392816",
+          "header": "@@ -9,3 +11,5 @@ export interface SessionStore {",
+          "oldStart": 9,
+          "oldCount": 3,
+          "newStart": 11,
+          "newCount": 5,
+          "rows": 5
+        }
+      ],
+      "role": "source"
+    },
+    {
+      "path": "test/session.test.ts",
+      "status": "modified",
+      "hunks": [
+        {
+          "id": "e018a657ee",
+          "header": "@@ -6,3 +6,11 @@ test(\"creates and resolves a session\", async () => {",
+          "oldStart": 6,
+          "oldCount": 3,
+          "newStart": 6,
+          "newCount": 11,
+          "rows": 11
+        }
+      ],
+      "role": "test"
+    }
+  ],
+  "guide": {
+    "overview": "Sessions now expire after seven days without activity. The change adds `expiresAt` to the session model, enforces it in `SessionManager.resolve`, slides it forward on each authenticated request, and mirrors it in the cookie.\n\nThe risk is in `resolve`: the expired-session delete is not awaited, and sessions stored before this change have no `expiresAt`.",
+    "generatedBy": "ai",
+    "steps": [
+      {
+        "id": "session-shape",
+        "title": "Sessions gain an expiry",
+        "kind": "context",
+        "narrative": "`Session` now carries `expiresAt`, and a seven-day `DEFAULT_TTL_MS` is introduced. Every later step reads or writes this field, so check that it is required rather than optional: existing stored sessions will not have it.",
+        "items": [
+          {
+            "path": "src/session/types.ts",
+            "hunks": "all"
+          }
+        ]
+      },
+      {
+        "id": "manager",
+        "title": "The manager sets, checks and extends expiry",
+        "kind": "core",
+        "dependsOn": [
+          "session-shape"
+        ],
+        "narrative": "`create` stamps `expiresAt`, `resolve` rejects and deletes expired sessions, and the new `touch` slides the expiry forward. The clock is injectable so tests can move time. This is where the behavior change lives: look at the expired branch in `resolve` closely.",
+        "items": [
+          {
+            "path": "src/session/manager.ts",
+            "hunks": "all"
+          }
+        ]
+      },
+      {
+        "id": "http",
+        "title": "HTTP layer: cookie expiry and sliding sessions",
+        "kind": "wiring",
+        "dependsOn": [
+          "manager"
+        ],
+        "narrative": "Login now sets the cookie's `expires` to match the session, and the middleware calls `touch` on every authenticated request and clears the cookie on a 401.",
+        "items": [
+          {
+            "path": "src/http/login.ts",
+            "hunks": "all"
+          },
+          {
+            "path": "src/http/auth-middleware.ts",
+            "hunks": "all"
+          }
+        ]
+      },
+      {
+        "id": "tests-docs",
+        "title": "Tests and docs",
+        "kind": "tests",
+        "dependsOn": [
+          "manager"
+        ],
+        "narrative": "One new test covers expiry with a fake clock. Nothing covers `touch` or the middleware yet.",
+        "items": [
+          {
+            "path": "test/session.test.ts",
+            "hunks": "all"
+          },
+          {
+            "path": "docs/sessions.md",
+            "hunks": "all"
+          }
+        ]
+      },
+      {
+        "id": "lockfile",
+        "title": "Lockfile",
+        "kind": "mechanical",
+        "narrative": "An empty `packages` map added by npm. Safe to skim.",
+        "items": [
+          {
+            "path": "package-lock.json",
+            "hunks": [
+              "833a9a38a1"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "annotations": [
+    {
+      "id": "ann_4ed3b849c097",
+      "anchor": {
+        "kind": "lines",
+        "path": "src/session/manager.ts",
+        "side": "new",
+        "start": 8,
+        "end": 8,
+        "commit": "3f994023bcb408d3474122dad66934af4e141a8c",
+        "fingerprint": "57136be8740c",
+        "hunk": "bdf36111f7"
+      },
+      "body": "Injecting the clock is what lets the new test move time forward without sleeping.",
+      "source": "ai",
+      "author": {
+        "name": "anthropic/claude-sonnet-4-5",
+        "kind": "ai"
+      },
+      "createdAt": "2026-11-15T16:04:07.635Z"
+    }
+  ],
+  "threads": [
+    {
+      "id": "ai_a57f240ecde3",
+      "anchor": {
+        "kind": "lines",
+        "path": "src/session/manager.ts",
+        "side": "new",
+        "start": 22,
+        "end": 22,
+        "commit": "3f994023bcb408d3474122dad66934af4e141a8c",
+        "fingerprint": "6ac06fdee719",
+        "hunk": "bdf36111f7"
+      },
+      "source": "ai",
+      "status": "open",
+      "severity": "major",
+      "category": "bug",
+      "suggestion": {
+        "replacement": "      await this.store.delete(id);"
+      },
+      "comments": [
+        {
+          "id": "c_e78870d300ff",
+          "author": {
+            "name": "anthropic/claude-sonnet-4-5",
+            "kind": "ai"
+          },
+          "body": "The delete is not awaited, so a store error becomes an unhandled rejection and the request still returns as if the session was cleaned up. Await it (or deliberately `void` it and catch).",
+          "createdAt": "2026-11-15T16:04:07.632Z",
+          "ai": {
+            "provider": "anthropic",
+            "model": "claude-sonnet-4-5"
+          }
+        }
+      ]
+    },
+    {
+      "id": "ai_8855d5c2b9d1",
+      "anchor": {
+        "kind": "lines",
+        "path": "src/session/manager.ts",
+        "side": "new",
+        "start": 21,
+        "end": 21,
+        "commit": "3f994023bcb408d3474122dad66934af4e141a8c",
+        "fingerprint": "54e5675170e2",
+        "hunk": "bdf36111f7"
+      },
+      "source": "ai",
+      "status": "open",
+      "severity": "blocker",
+      "category": "correctness",
+      "comments": [
+        {
+          "id": "c_536039b72aa5",
+          "author": {
+            "name": "anthropic/claude-sonnet-4-5",
+            "kind": "ai"
+          },
+          "body": "Sessions written before this deploy have no `expiresAt`. `undefined < date` is `false`, so they never expire. Either backfill the store or treat a missing `expiresAt` as `createdAt + ttl`.",
+          "createdAt": "2026-11-15T16:04:07.633Z",
+          "ai": {
+            "provider": "anthropic",
+            "model": "claude-sonnet-4-5"
+          }
+        }
+      ]
+    },
+    {
+      "id": "ai_808e39d40ab5",
+      "anchor": {
+        "kind": "lines",
+        "path": "src/http/auth-middleware.ts",
+        "side": "new",
+        "start": 12,
+        "end": 12,
+        "commit": "3f994023bcb408d3474122dad66934af4e141a8c",
+        "fingerprint": "7355c07feabb",
+        "hunk": "355d5cb8a1"
+      },
+      "source": "ai",
+      "status": "open",
+      "severity": "minor",
+      "category": "performance",
+      "comments": [
+        {
+          "id": "c_df676b7399c0",
+          "author": {
+            "name": "anthropic/claude-sonnet-4-5",
+            "kind": "ai"
+          },
+          "body": "`touch` writes to the store on every authenticated request. Consider only extending when less than half the TTL remains.",
+          "createdAt": "2026-11-15T16:04:07.634Z",
+          "ai": {
+            "provider": "anthropic",
+            "model": "claude-sonnet-4-5"
+          }
+        }
+      ]
+    },
+    {
+      "id": "gh_9001",
+      "anchor": {
+        "kind": "lines",
+        "path": "src/http/login.ts",
+        "side": "new",
+        "start": 5,
+        "end": 5,
+        "commit": "3f994023bcb408d3474122dad66934af4e141a8c",
+        "fingerprint": "3dd8992a3092",
+        "hunk": "ae8e7eb32f"
+      },
+      "source": "github",
+      "status": "open",
+      "external": {
+        "github": {
+          "commentIds": [
+            9001,
+            9002
+          ],
+          "url": "https://github.com/acme/app/pull/482#discussion_r9001"
+        }
+      },
+      "comments": [
+        {
+          "id": "ghc_9001",
+          "author": {
+            "name": "priya",
+            "kind": "human"
+          },
+          "body": "Should this also set `secure: true`? We only serve over HTTPS.",
+          "createdAt": "2026-11-14T16:02:00Z",
+          "githubId": 9001
+        },
+        {
+          "id": "ghc_9002",
+          "author": {
+            "name": "dana",
+            "kind": "human"
+          },
+          "body": "Good call, I'll add it in a follow-up so this PR stays about expiry.",
+          "createdAt": "2026-11-14T17:40:00Z",
+          "githubId": 9002
+        }
+      ]
+    },
+    {
+      "id": "local_example",
+      "source": "local",
+      "status": "open",
+      "anchor": {
+        "kind": "lines",
+        "path": "test/session.test.ts",
+        "side": "new",
+        "start": 10,
+        "end": 10,
+        "commit": "3f994023bcb408d3474122dad66934af4e141a8c",
+        "fingerprint": "5d71c1b0fb56",
+        "hunk": "e018a657ee"
+      },
+      "comments": [
+        {
+          "id": "c_local_example",
+          "author": {
+            "name": "Matt",
+            "kind": "human"
+          },
+          "body": "Can we add a test for `touch` sliding the expiry, and one for the middleware clearing the cookie?",
+          "createdAt": "2026-11-15T09:12:00Z"
+        }
+      ]
+    }
+  ],
+  "state": {
+    "viewed": {}
+  }
+}
